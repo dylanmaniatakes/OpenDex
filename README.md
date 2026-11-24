@@ -58,6 +58,14 @@ I default to dark mode. Under **Appearance**, I can change the theme, accent, ty
 
 The app saves project links, settings, conversations, and attachments in a local workspace file. On macOS, it lives under `~/Library/Application Support/org.opendex.desktop`. OpenDex uses the operating system credential store for API and MCP keys. I can move the data folder with `--data-dir` or `OPENDEX_DATA_DIR`. OpenDex allows one running copy per desktop user, including when I choose a different data folder. Messages, attachments, and approved tool output go to the currently selected model endpoint.
 
+### Encrypted settings backup
+
+In **Settings → Backups**, I can export my provider connections and pinned models, MCP configuration, permission profile, appearance, global instructions, and project links. The archive includes API keys and MCP bearer keys I saved in OpenDex. I protect it with a passphrase and keep that passphrase so I can restore the file later. The archive uses the [age file format](https://age-encryption.org/v1).
+
+To restore, I open the backup and enter its passphrase. I review the connections and permission profile and can choose a new folder for each project before applying the settings. Restoration replaces the saved settings and puts the keys in the destination computer’s credential store. My existing conversations and project links stay in place. The backup carries project links without copying their files or conversation history.
+
+My ChatGPT Account connection is included as a setting. I use **Connect account** on a new computer because Codex manages that session in its own credential store. I also set up any environment variables referenced by provider headers or local MCP servers on the new computer. [Codex credential storage](https://learn.chatgpt.com/docs/auth?surface=cli#credential-storage)
+
 ## Build from source
 
 I use Rust for the provider adapters, state, MCP, and permission checks. Tauri provides the desktop window and native dialogs, with a small HTML/CSS/JavaScript frontend and no Node build step. The workspace supports **Rust 1.95** and uses the checked-in dependency lockfile.
@@ -82,10 +90,13 @@ I use loopback fixtures to test each wire format and MCP transport without accou
 
 I verified conversation-level MCP selection with two loopback servers in the macOS app. I declined and approved individual tool calls under a globally permissive profile, checked that a denied tool stayed out of the model request, and ran a Code Agent conversation with an empty selection.
 
+I exported and restored an encrypted settings backup between two local data folders in the macOS app. I kept the destination conversation, remapped a project folder, and confirmed that the restored Keychain entries authenticated requests to a model fixture and an MCP fixture. Automated tests cover wrong passphrases, tampering, and changes to the file after preview.
+
 ### Source layout
 
 - `src/providers` contains inventory discovery, API payloads, and streaming decoders.
 - `src/state.rs` owns the conversation and settings schema, atomic persistence, and credential access.
+- `src/backup.rs` owns encrypted settings export, restore preview, and credential restoration.
 - `src/agent.rs` contains project file tools, command scoping, and Git operations.
 - `src/mcp.rs` contains the JSON-RPC connection and tool operations.
 - `src/codex.rs` connects to the optional Codex app server.
@@ -95,11 +106,5 @@ I verified conversation-level MCP selection with two loopback servers in the mac
 ## Preview scope
 
 This is my first local preview. My priorities are provider freedom, usable MCP settings, project-based agent work, and transparent permissions. I still have work to do on voice, generated media, web and computer-use tools, automations, shared/cloud history, MCP subscriptions and media-rich prompts, and platform packaging. I plan to share the source after I’ve verified the workflows I use most often.
-
-### Planned encrypted backup and restore
-
-I want to be able to save a password-protected backup of my complete settings for a reinstall or a move to another computer. That includes provider connections and model lists, MCP settings, permission profiles, appearance, instructions, and project links. I plan to include OpenDex-managed API keys and MCP credentials in the encrypted archive, along with provider account connection details.
-
-On restore, I want OpenDex to authenticate and decrypt the file before applying any changes, let me remap project paths, and put restored secrets back in the operating system credential store. For provider-managed account logins, I plan to use supported migration methods where available and guide users through sign-in again when a session cannot be transferred.
 
 I’m making OpenDex available under the [MIT License](LICENSE).

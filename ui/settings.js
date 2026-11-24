@@ -1,4 +1,5 @@
 import { $, button, check, el, field, lines, options, uuid } from './dom.js';
+import { backupForms } from './backup-settings.js';
 import { icon } from './icons.js';
 
 const adapters = {
@@ -15,6 +16,7 @@ const sections = [
   ['providers', 'Providers', 'server'], ['mcp', 'MCP Servers', 'plug'],
   ['permissions', 'Permissions', 'shield'], ['appearance', 'Appearance', 'palette'],
   ['instructions', 'Instructions', 'note'],
+  ['backups', 'Backups', 'shield'],
 ];
 
 const profiles = [
@@ -80,7 +82,7 @@ export function settingsPanel(api) {
       button(label, () => { tab = key; render(); }, {
         glyph, style: 'settings-tab' + (tab === key ? ' current' : ''),
       })));
-    const page = { providers, mcp, permissions, appearance, instructions }[tab]();
+    const page = { providers, mcp, permissions, appearance, instructions, backups }[tab]();
     $('settings-content').replaceChildren(page);
   }
 
@@ -489,6 +491,22 @@ export function settingsPanel(api) {
           }, { glyph: 'check', style: 'button primary' }))));
   }
 
+  function backups() {
+    const forms = backupForms(api, formSection, run, permissionName, async () => {
+      selectedProvider = null;
+      selectedServer = null;
+      newProviderKind = null;
+      newServer = false;
+      discovery.clear();
+      tested.clear();
+      accountStatus = undefined;
+      authUrl = undefined;
+      await api.refresh();
+    });
+    return el('div', { class: 'settings-page' },
+      heading('Backups', 'Move your connections, keys, and settings between computers.'), forms);
+  }
+
   async function run(button, status, operation) {
     button.disabled = true;
     status.textContent = 'Working…';
@@ -499,7 +517,10 @@ export function settingsPanel(api) {
   }
 
   $('close-settings').addEventListener('click', () => $('settings').close());
-  $('settings').addEventListener('close', () => api.previewAppearance(api.data().appearance));
+  $('settings').addEventListener('close', () => {
+    if (tab === 'backups') $('settings-content').replaceChildren();
+    api.previewAppearance(api.data().appearance);
+  });
 
   return { open, accountConnection: (event) => {
     authUrl = event.url;

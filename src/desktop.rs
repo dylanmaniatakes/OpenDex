@@ -2,7 +2,7 @@
 //! The webview handles presentation and user input.
 use crate::{
     agent::{self, Capability},
-    codex,
+    backup, codex,
     mcp::{self, Connection},
     providers::{self, Tool},
     state::{
@@ -36,6 +36,7 @@ struct Desktop {
     workspaces: Mutex<HashSet<PathBuf>>,
     approvals: Mutex<HashMap<Uuid, oneshot::Sender<bool>>>,
     codex_lock: AsyncMutex<()>,
+    backup_lock: AsyncMutex<()>,
 }
 
 type AppState<'a> = State<'a, Arc<Desktop>>;
@@ -102,11 +103,12 @@ fn save_provider(
             .providers
             .iter()
             .find(|provider| provider.id == value.id);
+        value.secret_ref = existing.and_then(|old| old.secret_ref);
         let changed =
             existing.is_some_and(|old| old.endpoint != value.endpoint || old.kind != value.kind);
         value.has_secret = existing.is_some_and(|old| old.has_secret) && !changed;
         if let Some(old) = existing.filter(|old| old.has_secret && (forget || changed)) {
-            delete_secret(old.id, &old.endpoint)?;
+            delete_secret(old.credential_id(), &old.endpoint)?;
             value.has_secret = false;
         }
         if let Some(secret) = &secret {
@@ -114,7 +116,7 @@ fn save_provider(
                 value.kind != ProviderKind::ChatGptAccount,
                 "Connect this provider through its account flow."
             );
-            write_secret(value.id, &value.endpoint, secret)?;
+            write_secret(value.credential_id(), &value.endpoint, secret)?;
             value.has_secret = true;
         }
         if let Some(item) = data
@@ -135,7 +137,7 @@ fn remove_provider(app: AppState<'_>, id: Uuid) -> Reply<()> {
     reply(app.store.change(|data| {
         let old = provider(data, id)?;
         if old.has_secret {
-            delete_secret(old.id, &old.endpoint)?;
+            delete_secret(old.credential_id(), &old.endpoint)?;
         }
         data.providers.retain(|value| value.id != id);
         for thread in &mut data.threads {
@@ -178,11 +180,12 @@ fn save_server(
     reply(app.store.change(|data| {
         value.validate()?;
         let existing = data.servers.iter().find(|server| server.id == value.id);
+        value.secret_ref = existing.and_then(|old| old.secret_ref);
         let changed = existing
             .is_some_and(|old| old.transport != value.transport || old.address != value.address);
         value.has_secret = existing.is_some_and(|old| old.has_secret) && !changed;
         if let Some(old) = existing.filter(|old| old.has_secret && (forget || changed)) {
-            delete_secret(old.id, &old.address)?;
+            delete_secret(old.credential_id(), &old.address)?;
             value.has_secret = false;
         }
         if let Some(secret) = &secret {
@@ -190,7 +193,7 @@ fn save_server(
                 value.transport == Transport::Http,
                 "Bearer keys are supported for HTTP servers."
             );
-            write_secret(value.id, &value.address, secret)?;
+            write_secret(value.credential_id(), &value.address, secret)?;
             value.has_secret = true;
         }
         if let Some(item) = data.servers.iter_mut().find(|server| server.id == value.id) {
@@ -211,7 +214,7 @@ fn remove_server(app: AppState<'_>, id: Uuid) -> Reply<()> {
             .find(|server| server.id == id)
             .context("That MCP server no longer exists.")?;
         if server.has_secret {
-            delete_secret(server.id, &server.address)?;
+            delete_secret(server.credential_id(), &server.address)?;
         }
         data.servers.retain(|server| server.id != id);
         for thread in &mut data.threads {
@@ -348,6 +351,76 @@ fn save_settings(
     reply(
         app.store
             .update_settings(appearance, permissions, codex_path, instructions),
+    )
+}
+
+#[tauri::command]
+async fn export_settings_backup(app: AppState<'_>, path: PathBuf, password: String) -> Reply<()> {
+    reply(
+        async {
+            let _lock = app
+                .backup_lock
+                .try_lock()
+                .context("A backup operation is already in progress.")?;
+            let app = Arc::clone(&app);
+            tauri::async_runtime::spawn_blocking(move || {
+                backup::export(&app.store, &path, password)
+            })
+            .await?
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn preview_settings_backup(
+    app: AppState<'_>,
+    path: PathBuf,
+    password: String,
+) -> Reply<backup::Preview> {
+    reply(
+        async {
+            let _lock = app
+                .backup_lock
+                .try_lock()
+                .context("A backup operation is already in progress.")?;
+            tauri::async_runtime::spawn_blocking(move || {
+                let (archive, checksum) = backup::open(&path, password, None)?;
+                Ok(archive.preview(checksum))
+            })
+            .await?
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn restore_settings_backup(
+    app: AppState<'_>,
+    path: PathBuf,
+    password: String,
+    checksum: [u8; 32],
+    project_folders: HashMap<Uuid, PathBuf>,
+) -> Reply<backup::RestoreResult> {
+    reply(
+        async {
+            let _lock = app
+                .backup_lock
+                .try_lock()
+                .context("A backup operation is already in progress.")?;
+            let app = Arc::clone(&app);
+            tauri::async_runtime::spawn_blocking(move || {
+                let (archive, _) = backup::open(&path, password, Some(checksum))?;
+                let runs = app.runs.lock().expect("runs lock");
+                ensure!(
+                    runs.is_empty(),
+                    "Finish or stop active turns before restoring settings."
+                );
+                archive.restore(&app.store, project_folders)
+            })
+            .await?
+        }
+        .await,
     )
 }
 
@@ -1367,6 +1440,7 @@ pub fn run() {
                 workspaces: Mutex::new(HashSet::new()),
                 approvals: Mutex::new(HashMap::new()),
                 codex_lock: AsyncMutex::new(()),
+                backup_lock: AsyncMutex::new(()),
             }));
             Ok(())
         })
@@ -1382,6 +1456,9 @@ pub fn run() {
             mcp_read_resource,
             mcp_get_prompt,
             save_settings,
+            export_settings_backup,
+            preview_settings_backup,
+            restore_settings_backup,
             account_action,
             new_thread,
             open_project,

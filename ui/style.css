@@ -306,6 +306,11 @@ input[type="range"], input[type="checkbox"] { accent-color: var(--accent); }
 .file-chip { margin: 3px 0; }
 .mcp-tools, .account-panel { display: grid; gap: 9px; }
 .mcp-tool-rule { padding: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.backup-preview { display: grid; gap: 12px; border-top: 1px solid var(--line); padding-top: var(--space); overflow-wrap: anywhere; }
+.backup-preview h4, .backup-preview p, .backup-preview ul { margin: 0; }
+.backup-projects { display: grid; gap: 8px; }
+.backup-project { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px 0; }
+.backup-project .field-note { display: block; }
 .account-panel { border-top: 1px solid var(--line); padding-top: 13px; }
 .account-url { display: flex; align-items: center; gap: 8px; font-size: .78rem; color: var(--muted); }
 .empty-settings { display: grid; justify-items: center; gap: 8px; text-align: center; color: var(--muted); padding: 31px 14px; border: 1px dashed var(--line-strong); border-radius: var(--radius); font-size: .84rem; }

@@ -190,7 +190,7 @@ impl Connection {
             Transport::Http => Channel::Http(Box::new(Streamable {
                 client: client.clone(),
                 url: endpoint(&server.address)?,
-                secret: read_secret(server.id, &server.address, server.has_secret)?,
+                secret: read_secret(server.credential_id(), &server.address, server.has_secret)?,
                 session: None,
             })),
         };

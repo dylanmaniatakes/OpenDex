@@ -277,6 +277,7 @@ fn server(address: String, current_protocol: bool) -> Server {
         args: vec![],
         env: vec![],
         has_secret: false,
+        secret_ref: None,
         enabled: true,
         blocked_tools: vec![],
         tool_permission: None,

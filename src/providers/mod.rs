@@ -35,7 +35,11 @@ pub fn client() -> Result<Client> {
 }
 
 fn request(provider: &Provider, request: RequestBuilder) -> Result<RequestBuilder> {
-    let secret = read_secret(provider.id, &provider.endpoint, provider.has_secret)?;
+    let secret = read_secret(
+        provider.credential_id(),
+        &provider.endpoint,
+        provider.has_secret,
+    )?;
     request_with_secret(provider, request, secret.as_deref())
 }
 

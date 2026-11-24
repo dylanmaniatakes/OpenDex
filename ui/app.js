@@ -91,7 +91,7 @@ async function savePreferences(changes) {
   await refresh();
 }
 
-const settings = settingsPanel({ data: () => data, invoke, refresh, savePreferences, previewAppearance, toast, copy, confirm });
+const settings = settingsPanel({ data: () => data, invoke, io, refresh, savePreferences, previewAppearance, toast, copy, confirm });
 
 function showDetails(title, content) {
   $('details-title').textContent = title;

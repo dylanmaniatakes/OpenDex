@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod backup;
 pub mod codex;
 #[cfg(feature = "desktop")]
 pub mod desktop;

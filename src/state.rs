@@ -47,6 +47,8 @@ pub struct Provider {
     #[serde(default)]
     pub has_secret: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_header: Option<String>,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
@@ -65,11 +67,16 @@ impl Provider {
             endpoint: ProviderKind::Ollama.endpoint().into(),
             models: vec![],
             has_secret: false,
+            secret_ref: None,
             api_key_header: None,
             headers: vec![],
             token_limit: None,
             ollama_think: None,
         }
+    }
+
+    pub fn credential_id(&self) -> Uuid {
+        self.secret_ref.unwrap_or(self.id)
     }
 
     pub fn key_header(&self) -> Option<&str> {
@@ -198,6 +205,8 @@ pub struct Server {
     pub env: Vec<String>,
     #[serde(default)]
     pub has_secret: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<Uuid>,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -211,6 +220,10 @@ pub struct Server {
 }
 
 impl Server {
+    pub fn credential_id(&self) -> Uuid {
+        self.secret_ref.unwrap_or(self.id)
+    }
+
     /// Server and tool rules can only narrow the active permission profile.
     /// Existing blocks remain in force for configurations saved by older builds.
     pub fn tool_rule(&self, global: Rule, name: &str) -> Rule {
@@ -355,7 +368,7 @@ impl Default for Appearance {
 }
 
 impl Appearance {
-    fn sanitize(&mut self) {
+    pub(crate) fn sanitize(&mut self) {
         let defaults = Self::default();
         if !matches!(self.theme.as_str(), "dark" | "light" | "system") {
             self.theme = defaults.theme;
@@ -760,6 +773,10 @@ impl Store {
 
     pub fn snapshot(&self) -> Data {
         self.data.lock().expect("store lock").clone()
+    }
+
+    pub(crate) fn inspect<T>(&self, inspect: impl FnOnce(&Data) -> T) -> T {
+        inspect(&self.data.lock().expect("store lock"))
     }
 
     pub fn change<T>(&self, update: impl FnOnce(&mut Data) -> Result<T>) -> Result<T> {
