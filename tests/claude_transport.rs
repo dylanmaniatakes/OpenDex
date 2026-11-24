@@ -163,7 +163,7 @@ sys.stdin.read()
             |piece| streamed.push_str(piece),
             |call| {
                 calls.push(call);
-                async { (false, "Permission denied".into()) }
+                async { Ok((false, "Permission denied".into())) }
             },
         )
         .await
@@ -232,4 +232,44 @@ fn provider_executable_path_defaults_and_survives_serialization() {
     let restored: opendex::state::Provider =
         serde_json::from_str(&serde_json::to_string(&provider).unwrap()).unwrap();
     assert_eq!(restored.claude_path, provider.claude_path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fatal_tool_callback_stops_claude_before_later_requests_are_executed() {
+    use opendex::{
+        providers::Tool,
+        state::{Message, Role},
+    };
+    let mut bridge=fixture_turn(r#"
+import json,sys
+def send(value):print(json.dumps(value),flush=True)
+init=json.loads(sys.stdin.readline())
+send({'type':'control_response','response':{'request_id':init['request_id'],'subtype':'success','response':{}}})
+json.loads(sys.stdin.readline())
+def request(i):return {'type':'control_request','request_id':'tool'+str(i),'request':{'subtype':'mcp_message','server_name':'opendex','message':{'id':i,'method':'tools/call','params':{'name':'fixture_tool','arguments':{}}}}}
+send(request(1))
+reply=json.loads(sys.stdin.readline())
+assert reply['response']['response']['mcp_response']['result']['isError'] is False
+send(request(2));send(request(3))
+sys.stdin.read()
+"#,&[Tool{name:"fixture_tool".into(),description:"Fixture".into(),schema:serde_json::json!({"type":"object"})}]).await.unwrap();
+    let mut calls = 0;
+    let error = bridge
+        .generate(
+            &[Message::new(Role::User, "Use the fixture tool")],
+            |_| {},
+            |_| {
+                calls += 1;
+                let count = calls;
+                async move {
+                    anyhow::ensure!(count <= 1, "Tool budget exhausted");
+                    Ok((true, "First call finished".into()))
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(calls, 2);
+    assert!(error.to_string().contains("Tool budget exhausted"));
 }

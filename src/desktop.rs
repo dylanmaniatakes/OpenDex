@@ -1231,6 +1231,25 @@ impl ToolSession {
         .into()
     }
 
+    /// CLI-backed turns cannot withdraw tools after a model response. Stop the
+    /// transport when its next call exceeds the same limit used by API turns.
+    async fn call_and_save(&mut self, call: ToolCall) -> Result<(bool, String)> {
+        ensure!(
+            self.used < usize::from(self.turn.rules.max_steps),
+            "The tool-call limit was reached. Start another turn to continue."
+        );
+        let label = self.tool_label(&call.name);
+        let (allowed, output) = self.call(&call).await;
+        let mut message = Message::new(Role::Tool, &output);
+        message.tool_label = Some(label);
+        message.tool_name = Some(call.name);
+        message.tool_id = Some(call.id);
+        self.turn
+            .append(message)
+            .context("Could not save the tool result.")?;
+        Ok((allowed, output))
+    }
+
     async fn call(&mut self, call: &ToolCall) -> (bool, String) {
         self.used += 1;
         if self.used > self.turn.rules.max_steps.into() {
@@ -1390,21 +1409,9 @@ async fn complete_turn(
                 },
                 |call| {
                     let lock = &session_lock;
-                    let context = &turn;
                     async move {
                         let mut session = lock.lock().await;
-                        let label = session.tool_label(&call.name);
-                        let (allowed, output) = session.call(&call).await;
-                        let mut message = Message::new(Role::Tool, &output);
-                        message.tool_label = Some(label);
-                        message.tool_name = Some(call.name);
-                        message.tool_id = Some(call.id);
-                        match context.append(message) {
-                            Ok(()) => (allowed, output),
-                            Err(error) => {
-                                (false, format!("Could not save the tool result: {error:#}"))
-                            }
-                        }
+                        session.call_and_save(call).await
                     }
                 },
             )
@@ -1438,21 +1445,9 @@ async fn complete_turn(
                 },
                 |call| {
                     let lock = &session_lock;
-                    let context = &turn;
                     async move {
                         let mut session = lock.lock().await;
-                        let label = session.tool_label(&call.name);
-                        let (allowed, output) = session.call(&call).await;
-                        let mut message = Message::new(Role::Tool, &output);
-                        message.tool_label = Some(label);
-                        message.tool_name = Some(call.name);
-                        message.tool_id = Some(call.id);
-                        match context.append(message) {
-                            Ok(()) => (allowed, output),
-                            Err(error) => {
-                                (false, format!("Could not save the tool result: {error:#}"))
-                            }
-                        }
+                        session.call_and_save(call).await
                     }
                 },
             )

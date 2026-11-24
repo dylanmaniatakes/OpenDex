@@ -249,7 +249,7 @@ impl Bridge {
 
     /// All tool executions re-enter the caller's permission and persistence layer.
     /// Callers must drop the bridge when cancelling a turn. Its child uses `kill_on_drop`.
-    pub async fn generate<F: Future<Output = (bool, String)>>(
+    pub async fn generate<F: Future<Output = Result<(bool, String)>>>(
         &mut self,
         messages: &[Message],
         mut delta: impl FnMut(&str),
@@ -311,7 +311,7 @@ impl Bridge {
                                 name: name.into(),
                                 arguments: rpc["params"]["arguments"].clone(),
                             })
-                            .await
+                            .await?
                         } else {
                             (false, "This tool was not exposed by OpenDex.".into())
                         };

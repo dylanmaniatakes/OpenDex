@@ -239,7 +239,7 @@ impl Bridge {
 
     /// Keep Codex native tools in an empty, read-only directory. Code Agent
     /// and MCP actions re-enter OpenDex via the advertised dynamic tools.
-    pub async fn generate<F: Future<Output = (bool, String)>>(
+    pub async fn generate<F: Future<Output = Result<(bool, String)>>>(
         &mut self,
         model: &str,
         system: &str,
@@ -337,7 +337,7 @@ impl Bridge {
                             name: name.into(),
                             arguments: params["arguments"].clone(),
                         })
-                        .await
+                        .await?
                     } else {
                         (false, "This tool was not exposed by OpenDex.".into())
                     };
