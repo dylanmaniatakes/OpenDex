@@ -408,16 +408,21 @@ async function setSelection(thread, provider, model) {
 function modelPicker(thread) {
   const provider = data.providers.find((item) => item.id === thread?.provider_id) ?? data.providers[0];
   const model = provider?.models.includes(thread?.model_id) ? thread.model_id : null;
-  const items = data.providers.map((item) => el('option', { value: item.id }, item.name));
-  $('provider-select').replaceChildren(...(items.length ? items : [el('option', { value: '' }, 'Add provider')]));
-  $('provider-select').value = provider?.id ?? '';
+  const query = $('model-filter').value.trim().toLocaleLowerCase();
+  const matches = (value) => query ? `${value}`.toLocaleLowerCase().includes(query) : true;
+  const visibleProviders = data.providers.filter((item) => matches(item.name) || item.models.some(matches));
+  const items = visibleProviders.map((item) => el('option', { value: item.id }, item.name));
+  $('provider-select').replaceChildren(...(items.length ? items : [el('option', { value: '' }, 'No matching provider')]));
+  $('provider-select').value = items.some(({value}) => value === provider?.id) ? provider.id : items[0]?.value ?? '';
+  const selectedProvider = data.providers.find((item) => item.id === $('provider-select').value) ?? provider;
+  const models = (selectedProvider?.models ?? []).filter(matches);
   $('model-select').replaceChildren(
-    ...model ? [] : [el('option', { value: '' }, provider?.models.length ? 'Choose a model' : 'Add models')],
-    ...(provider?.models ?? []).map((id) => el('option', { value: id }, id)),
+    ...models.length ? [] : [el('option', { value: '' }, selectedProvider?.models.length ? 'No matching model' : 'Add models')],
+    ...models.map((id) => el('option', { value: id }, id)),
   );
-  $('model-select').value = model ?? '';
+  $('model-select').value = models.includes(model) ? model : models[0] ?? '';
   $('provider-select').disabled = Boolean(live()) || !items.length;
-  $('model-select').disabled = Boolean(live()) || !provider?.models.length;
+  $('model-select').disabled = Boolean(live()) || !models.length;
   $('permission-label').replaceChildren(...mode === 'agent' ? [
     button(permissionName(data.permissions.profile), () => settings.open('permissions'), {
       glyph: 'shield', title: 'Permission profile', style: 'permission-pill',
@@ -975,6 +980,16 @@ function bind() {
     const provider = data.providers.find((item) => item.id === event.target.value);
     await setSelection(current(), provider?.id, provider?.models[0]);
   }));
+  $('model-filter').addEventListener('input', () => {
+    if (!live()) modelPicker(current());
+  });
+  $('model-filter').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.target.value = '';
+      modelPicker(current());
+    }
+  });
   $('model-select').addEventListener('change', transient((event) => setSelection(current(), $('provider-select').value, event.target.value)));
   $('prompt').addEventListener('input', (event) => {
     const draft = draftOf();

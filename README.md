@@ -10,7 +10,7 @@ I built OpenDex to use the models I choose for everyday chat and coding. It runs
 4. Use **Discover models** to browse an endpoint’s inventory, or paste model IDs one per line and choose **Add models**. Duplicate IDs are removed. Each model I add appears in both modes. For Ollama Cloud I use the Ollama API key and can submit a query to the public model database, then add only the model IDs I want. I can also enter IDs manually.
 5. Use the sidebar dropdown to switch between **Model Chat** and **Code Agent**. Model Chat shows its conversations. In Code Agent, use **Add project** to choose a folder, then use the plus button beside a project to create another thread in it.
 
-I can search saved conversation titles, message text, project names, attachment names, MCP resource labels, selected providers and models, and tool names from the sidebar. Search stays on my computer and filters the selected mode. In Code Agent, matching project groups expand while I search. Escape clears the query.
+I can search saved conversation titles, message text, project names, attachment names, MCP resource labels, selected providers and models, and tool names from the sidebar. In the composer, I can filter provider and model lists by name so I can find the connection I want among several. Search stays on my computer and filters the selected mode. In Code Agent, matching project groups expand while I search. Escape clears the query.
 
 I can rename or export each conversation and set instructions globally or per thread. Export includes provider and model, thread instructions, tool outputs, saved attachment metadata, and MCP context labels while keeping attachment contents private. Both modes stream replies, and the stop button interrupts the active turn.
 
@@ -29,6 +29,8 @@ In **Model Chat**, I can edit a user message or retry a reply. Both actions crea
 | Ollama Local | `http://127.0.0.1:11434/api` | Local Ollama normally accepts unauthenticated requests. |
 | Ollama Cloud | `https://ollama.com/api` | Ollama API key. |
 | OpenAI-compatible | A service’s Chat Completions base URL | Optional bearer key and headers populated from environment variables. |
+| OpenAI-compatible model search | Composer filter | Filters the provider and model lists by name. |
+| Ollama Cloud model search | Public Ollama search | Searches only official library result cards; Ollama API key is optional for search. |
 
 For an Ollama Cloud connection, **Search Ollama** queries the public model database and shows its result IDs. Search responses are capped, and only official `library/{model}` result links are accepted. I click the ID to pin it, then use manual entry when Ollama search misses a private or custom model. The Cloud tag fetch remains available when I prefer to inspect that provider list. For example, LM Studio and many self-hosted inference servers expose Chat Completions. An endpoint with its own wire format needs a compatible gateway or a new adapter. Model discovery is optional, so I can still enter IDs when an endpoint provides inference only. Under **Advanced connection settings**, I can set the header that receives my saved API key. This lets me connect to gateways that expect a header such as `api-key`.
 
