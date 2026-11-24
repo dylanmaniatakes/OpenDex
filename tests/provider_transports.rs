@@ -3,6 +3,7 @@ use opendex::{
     mcp::Connection,
     providers::{self, Tool},
     state::{Attachment, Message, Provider, ProviderKind, Role, Server, Transport},
+    web::{self, Action, Config},
 };
 use serde_json::{Value, json};
 use std::{
@@ -98,6 +99,67 @@ fn tool() -> Tool {
         description: "Read an example file".into(),
         schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
     }
+}
+
+#[tokio::test]
+async fn web_services_route_only_the_configured_queries_and_pages() {
+    let fixture = Fixture::new(3, |request| {
+        let body = match request.line.trim() {
+            "GET /search?q=a%26b+c&format=json HTTP/1.1" => {
+                json!({"results":[
+                    {"url":"javascript:alert(1)","title":"Unsupported scheme"},
+                    {"url":"https://example.org/guide#install","title":"Guide","content":"First snippet"},
+                    {"url":"https://example.org/guide#install","title":"Duplicate"},
+                    {"url":"https://example.org/news","title":"News"},
+                    {"url":"https://example.org/other","title":"Beyond requested limit"}
+                ]})
+            }
+            "POST /api-prefix/web_search HTTP/1.1" => {
+                assert!(request.headers.contains("x-opendex-test:"));
+                assert_eq!(request.body, json!({"query":"a&b c","max_results":2}));
+                json!({"results":[{"url":"https://example.org/guide#install","title":"Guide","content":"Ollama snippet"}]})
+            }
+            "POST /api-prefix/web_fetch HTTP/1.1" => {
+                assert!(request.headers.contains("x-opendex-test:"));
+                assert_eq!(
+                    request.body,
+                    json!({"url":"https://example.org/guide#install"})
+                );
+                json!({"title":"Guide","content":"Page details","links":["/next"]})
+            }
+            other => panic!("unexpected web request {other}"),
+        };
+        ("application/json", String::new(), body.to_string())
+    });
+    let client = providers::client().unwrap();
+    let query = || Action::parse(web::SEARCH, &json!({"query":"a&b c","max_results":2})).unwrap();
+    let searxng = Config::Searxng {
+        endpoint: format!("{}/search", fixture.endpoint),
+    }
+    .resolve([])
+    .unwrap();
+    assert_eq!(searxng.tools().len(), 1);
+    let search = searxng.execute(&client, query()).await.unwrap();
+    assert_eq!(search.query.as_deref(), Some("a&b c"));
+    assert_eq!(search.sources.len(), 2);
+    assert_eq!(search.sources[0].content, "First snippet");
+    assert_eq!(search.sources[1].title, "News");
+
+    let mut cloud = provider(&fixture, ProviderKind::OllamaCloud);
+    cloud.headers = vec![("x-opendex-test".into(), "PATH".into())];
+    let ollama = Config::Ollama { provider: cloud.id }
+        .resolve([&cloud])
+        .unwrap();
+    assert_eq!(ollama.tools().len(), 2);
+    let search = ollama.execute(&client, query()).await.unwrap();
+    assert_eq!(search.sources[0].content, "Ollama snippet");
+    let action = Action::parse(web::FETCH, &json!({"url":search.sources[0].url})).unwrap();
+    let page = ollama.execute(&client, action).await.unwrap();
+    assert_eq!(page.sources[0].url, "https://example.org/guide#install");
+    assert_eq!(page.sources[0].content, "Page details");
+    assert!(Action::parse(web::FETCH, &json!({"url":"file:///tmp/source"})).is_err());
+    assert!(Action::parse(web::SEARCH, &json!({"query":"search","max_results":11})).is_err());
+    fixture.finish();
 }
 
 #[tokio::test]

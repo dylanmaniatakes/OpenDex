@@ -130,12 +130,14 @@ fn code_agent_branch_preserves_project_and_history_at_the_selected_message() {
     let server = Uuid::new_v4();
     assert!(source.mcp_scope.includes(server));
     source.mcp_scope = McpScope::Selected(vec![server]);
+    source.web_enabled = true;
     let branch = source
         .branch_at(source.messages[2].id, BranchAction::Continue)
         .unwrap();
     assert_eq!(branch.workspace, source.workspace);
     assert_eq!(branch.project_id, source.project_id);
     assert_eq!(branch.mcp_scope, source.mcp_scope);
+    assert!(branch.web_enabled);
     assert!(!branch.mcp_scope.includes(Uuid::new_v4()));
     assert_eq!(branch.messages.len(), 3);
     assert_eq!(branch.messages[1].role, Role::Tool);

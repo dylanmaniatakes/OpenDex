@@ -6,3 +6,4 @@ pub mod desktop;
 pub mod mcp;
 pub mod providers;
 pub mod state;
+pub mod web;

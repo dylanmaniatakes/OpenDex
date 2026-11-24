@@ -40,7 +40,7 @@ I use an Anthropic Console API key for Claude in OpenDex. Claude.ai subscription
 
 I choose a project folder for Code Agent to read, search, and edit. A Git worktree gives a thread a separate checkout and branch while keeping it under the original project in the sidebar. **Review changes** opens the worktree’s Git status and diff. I can run multiple conversations and use separate worktrees for concurrent agent turns on the same repository.
 
-I start in **Workspace** mode. It allows project reads and asks before writes, commands, and MCP calls. **Read only** gives the agent project inspection. **Custom** lets me set each action to **Deny**, **Ask every time**, or **Allow**, choose network access for scoped commands, and set a tool-call limit. **Full access** runs commands with my user permissions and network access. MCP calls still require approval in that profile.
+I start in **Workspace** mode. It allows project reads and asks before writes, commands, MCP calls, and web requests. **Read only** gives the agent project inspection. **Custom** lets me set each action to **Deny**, **Ask every time**, or **Allow**, choose network access for scoped commands, and set a tool-call limit. **Full access** runs commands with my user permissions and network access. MCP calls and web requests still require approval in that profile.
 
 On macOS I run scoped commands through Seatbelt. They can read approved project content and system or installed toolchain resources. Project writes and command networking follow the selected profile. A command approval covers the command and its child processes. Project builds that need caches or credentials outside the workspace may need a different permission profile. I run trusted local MCP executables separately from the command sandbox, so enabling one lets it start with my app’s user privileges.
 
@@ -54,6 +54,12 @@ I use the **Add MCP context** button in either composer to browse a server enabl
 
 I currently support initialized MCP sessions and the July 2026 protocol revision for tools, resources, and prompts. The MCP protocol selector is on each server. [MCP transport specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports)
 
+## Web search
+
+In **Settings → Web search**, I can point OpenDex at a SearXNG search URL with JSON output enabled or choose a saved Ollama Cloud connection. Ollama Cloud also lets the model request a page’s main text. The search service is independent of the model endpoint, so I can use web tools with a local model that supports tool calling. [SearXNG search API](https://docs.searxng.org/dev/search_api.html), [Ollama web API](https://docs.ollama.com/capabilities/web-search)
+
+I turn on **Web search** in the composer for each conversation where I want it. The approval prompt shows the query or page URL before OpenDex sends it. **Custom → Search and fetch web pages** controls when I’m asked. The conversation keeps the titles, URLs, and excerpts returned by the service, and I can open those sources in my browser.
+
 ## Appearance and data
 
 I default to dark mode. Under **Appearance**, I can change the theme, accent, typeface, text scale, spacing, widths, corner radius, and animation preference.
@@ -62,7 +68,7 @@ The app saves project links, settings, conversations, and attachments in a local
 
 ### Encrypted settings backup
 
-In **Settings → Backups**, I can export my provider connections and pinned models, MCP configuration, permission profile, appearance, global instructions, and project links. The archive includes API keys and MCP bearer keys I saved in OpenDex. I protect it with a passphrase and keep that passphrase so I can restore the file later. The archive uses the [age file format](https://age-encryption.org/v1).
+In **Settings → Backups**, I can export my provider connections and pinned models, MCP and web search configuration, permission profile, appearance, global instructions, and project links. The archive includes API keys and MCP bearer keys I saved in OpenDex. I protect it with a passphrase and keep that passphrase so I can restore the file later. The archive uses the [age file format](https://age-encryption.org/v1).
 
 To restore, I open the backup and enter its passphrase. I review the connections and permission profile and can choose a new folder for each project before applying the settings. Restoration replaces the saved settings and puts the keys in the destination computer’s credential store. My existing conversations and project links stay in place. The backup carries project links without copying their files or conversation history.
 
@@ -96,6 +102,8 @@ I exported and restored an encrypted settings backup between two local data fold
 
 I tested selecting several attachments in Model Chat, removing one, and verifying that the text and image reached a local model endpoint fixture. I edited that message after moving the source files and verified that the branch sent the saved copies. I also dragged a file from Finder into a Code Agent thread and confirmed that the endpoint received it.
 
+I tested SearXNG searches and Ollama page retrieval in the macOS app with local fixtures. I verified that declining a search kept it from reaching the service, that the source link opened in my browser, and that the Read only profile kept web tools out of the model request.
+
 ### Source layout
 
 - `src/providers` contains inventory discovery, API payloads, and streaming decoders.
@@ -103,12 +111,13 @@ I tested selecting several attachments in Model Chat, removing one, and verifyin
 - `src/backup.rs` owns encrypted settings export, restore preview, and credential restoration.
 - `src/agent.rs` contains project file tools, command scoping, and Git operations.
 - `src/mcp.rs` contains the JSON-RPC connection and tool operations.
+- `src/web.rs` sends search and page requests to the configured service and normalizes the sources.
 - `src/codex.rs` connects to the optional Codex app server.
 - `src/desktop.rs` coordinates turns, approval prompts, and desktop commands.
 - `ui` contains the desktop screens, appearance controls, and Markdown display.
 
 ## Preview scope
 
-This is my first local preview. My priorities are provider freedom, usable MCP settings, project-based agent work, and transparent permissions. I still have work to do on voice, generated media, web and computer-use tools, automations, shared/cloud history, MCP subscriptions and media-rich prompts, and platform packaging. I plan to share the source after I’ve verified the workflows I use most often.
+This is my first local preview. My priorities are provider freedom, usable MCP settings, project-based agent work, and transparent permissions. I still have work to do on voice, generated media, computer-use tools, automations, shared/cloud history, MCP subscriptions and media-rich prompts, and platform packaging. I plan to share the source after I’ve verified the workflows I use most often.
 
 I’m making OpenDex available under the [MIT License](LICENSE).

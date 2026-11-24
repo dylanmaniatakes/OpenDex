@@ -1,4 +1,5 @@
 //! Persistent app data. Credentials stay in the system credential store.
+use crate::web;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -292,6 +293,8 @@ pub struct Permissions {
     pub write: Rule,
     pub command: Rule,
     pub mcp: Rule,
+    #[serde(default = "ask")]
+    pub web: Rule,
     #[serde(default = "default_steps")]
     pub max_steps: u8,
     #[serde(default)]
@@ -302,6 +305,10 @@ fn default_steps() -> u8 {
     16
 }
 
+fn ask() -> Rule {
+    Rule::Ask
+}
+
 impl Default for Permissions {
     fn default() -> Self {
         Self {
@@ -310,6 +317,7 @@ impl Default for Permissions {
             write: Rule::Ask,
             command: Rule::Ask,
             mcp: Rule::Ask,
+            web: Rule::Ask,
             max_steps: default_steps(),
             network: false,
         }
@@ -319,11 +327,39 @@ impl Default for Permissions {
 impl Permissions {
     /// Resolve a named profile on the backend, regardless of submitted custom values.
     pub fn effective(&self) -> Self {
-        let (read, write, command, mcp, network) = match self.profile {
-            Profile::ReadOnly => (Rule::Allow, Rule::Deny, Rule::Deny, Rule::Deny, false),
-            Profile::Workspace => (Rule::Allow, Rule::Ask, Rule::Ask, Rule::Ask, false),
-            Profile::FullAccess => (Rule::Allow, Rule::Allow, Rule::Allow, Rule::Ask, true),
-            Profile::Custom => (self.read, self.write, self.command, self.mcp, self.network),
+        let (read, write, command, mcp, web, network) = match self.profile {
+            Profile::ReadOnly => (
+                Rule::Allow,
+                Rule::Deny,
+                Rule::Deny,
+                Rule::Deny,
+                Rule::Deny,
+                false,
+            ),
+            Profile::Workspace => (
+                Rule::Allow,
+                Rule::Ask,
+                Rule::Ask,
+                Rule::Ask,
+                Rule::Ask,
+                false,
+            ),
+            Profile::FullAccess => (
+                Rule::Allow,
+                Rule::Allow,
+                Rule::Allow,
+                Rule::Ask,
+                Rule::Ask,
+                true,
+            ),
+            Profile::Custom => (
+                self.read,
+                self.write,
+                self.command,
+                self.mcp,
+                self.web,
+                self.network,
+            ),
         };
         Self {
             profile: self.profile,
@@ -331,6 +367,7 @@ impl Permissions {
             write,
             command,
             mcp,
+            web,
             max_steps: self.max_steps.clamp(1, 50),
             network,
         }
@@ -625,6 +662,8 @@ pub struct Thread {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "McpScope::is_all")]
     pub mcp_scope: McpScope,
+    #[serde(default)]
+    pub web_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_thread: Option<Uuid>,
 }
@@ -679,6 +718,7 @@ impl Thread {
             model_id: self.model_id.clone(),
             instructions: self.instructions.clone(),
             mcp_scope: self.mcp_scope.clone(),
+            web_enabled: self.web_enabled,
             parent_thread: Some(self.id),
         })
     }
@@ -689,6 +729,8 @@ impl Thread {
 pub struct Data {
     pub providers: Vec<Provider>,
     pub servers: Vec<Server>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<web::Config>,
     pub threads: Vec<Thread>,
     pub projects: Vec<Project>,
     pub permissions: Permissions,
@@ -703,6 +745,7 @@ impl Default for Data {
         Self {
             providers: vec![Provider::local()],
             servers: vec![],
+            web_search: None,
             threads: vec![],
             projects: vec![],
             permissions: Permissions::default(),
@@ -715,6 +758,15 @@ impl Default for Data {
 }
 
 impl Data {
+    pub(crate) fn set_web_search(&mut self, search: Option<web::Config>) {
+        if self.web_search != search {
+            self.web_search = search;
+            for thread in &mut self.threads {
+                thread.web_enabled = false;
+            }
+        }
+    }
+
     pub fn project_for_root(&mut self, root: PathBuf) -> Project {
         if let Some(project) = self.projects.iter().find(|project| project.root == root) {
             return project.clone();

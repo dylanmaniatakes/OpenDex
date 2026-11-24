@@ -6,6 +6,7 @@ use crate::{
         Appearance, Data, McpScope, Permissions, Profile, Project, Provider, ProviderKind, Server,
         Store, Transport, delete_secret, read_secret, write_secret,
     },
+    web,
 };
 use age::secrecy::SecretString;
 use anyhow::{Context, Result, ensure};
@@ -49,6 +50,8 @@ pub struct Archive {
     version: u32,
     providers: Vec<Connection<Provider>>,
     servers: Vec<Connection<Server>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web_search: Option<web::Config>,
     projects: Vec<Project>,
     permissions: Permissions,
     appearance: Appearance,
@@ -69,6 +72,7 @@ pub struct Preview {
     pub checksum: [u8; 32],
     pub providers: Vec<String>,
     pub mcp_servers: Vec<String>,
+    pub web_search: Option<&'static str>,
     pub local_servers: Vec<String>,
     pub projects: Vec<ProjectPreview>,
     pub has_chatgpt_connection: bool,
@@ -122,6 +126,7 @@ impl Archive {
             version: SCHEMA_VERSION,
             providers,
             servers,
+            web_search: data.web_search.clone(),
             projects: data.projects.clone(),
             permissions: data.permissions.clone(),
             appearance: data.appearance.clone(),
@@ -157,6 +162,9 @@ impl Archive {
             provider.settings.has_secret = provider.key.is_some();
             provider.settings.secret_ref = None;
         }
+        if let Some(search) = &self.web_search {
+            search.resolve(self.providers.iter().map(|entry| &entry.settings))?;
+        }
         for server in &mut self.servers {
             server.settings.validate()?;
             ensure!(
@@ -185,6 +193,7 @@ impl Archive {
     pub fn preview(&self, checksum: [u8; 32]) -> Preview {
         Preview {
             checksum,
+            web_search: self.web_search.as_ref().map(web::Config::name),
             providers: self
                 .providers
                 .iter()
@@ -284,6 +293,7 @@ impl Archive {
             .into_iter()
             .map(|entry| entry.settings)
             .collect();
+        data.set_web_search(self.web_search);
         data.appearance = self.appearance;
         data.permissions = self.permissions;
         data.instructions = self.instructions;

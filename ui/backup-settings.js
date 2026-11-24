@@ -31,7 +31,7 @@ function exportForm(api, section, run) {
   field('New backup passphrase', password, 'Use at least 12 characters. You’ll need this passphrase to restore the backup.'),
   field('Confirm passphrase', repeated),
   el('div', { class: 'form-actions wide' }, save, status));
-  return section('Export settings', 'Includes provider and MCP keys, project links, permissions, appearance, and global instructions.', form);
+  return section('Export settings', 'Includes provider and MCP keys, web search, project links, permissions, appearance, and global instructions.', form);
 }
 
 function restoreForm(api, section, run, permissionName, onRestored) {
@@ -92,10 +92,11 @@ function restoreForm(api, section, run, permissionName, onRestored) {
       el('ul', {}, values.map((name) => el('li', {}, name))));
     preview.replaceChildren(el('div', { class: 'backup-preview' },
       el('h4', {}, 'Ready to restore'),
-      el('p', { class: 'muted' }, 'Restoring replaces saved providers, MCP configuration, permissions, appearance, and global instructions. Your current conversations and project links are kept.'),
+      el('p', { class: 'muted' }, 'Restoring replaces saved providers, MCP configuration, web search, permissions, appearance, and global instructions. Your current conversations and project links are kept.'),
       info.has_chatgpt_connection && el('p', { class: 'muted' }, 'Sign in again on a new machine under Providers → ChatGPT Account.'),
       showNames('Providers', info.providers),
       showNames('MCP servers', info.mcp_servers),
+      info.web_search && el('p', {}, 'Web search ', el('strong', {}, info.web_search)),
       showNames('Enabled local MCP commands', info.local_servers),
       el('p', {}, 'Permission profile ', el('strong', {}, permissionName(info.permission_profile))),
       info.codex_path && el('p', {}, 'Codex executable ', el('code', {}, info.codex_path)),

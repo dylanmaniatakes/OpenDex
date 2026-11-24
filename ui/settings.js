@@ -14,6 +14,7 @@ const adapters = {
 
 const sections = [
   ['providers', 'Providers', 'server'], ['mcp', 'MCP Servers', 'plug'],
+  ['web', 'Web search', 'search'],
   ['permissions', 'Permissions', 'shield'], ['appearance', 'Appearance', 'palette'],
   ['instructions', 'Instructions', 'note'],
   ['backups', 'Backups', 'shield'],
@@ -21,15 +22,15 @@ const sections = [
 
 const profiles = [
   ['read_only', 'Read only', 'Read project files and review changes.'],
-  ['workspace', 'Workspace', 'Read the project and ask before edits, commands, and MCP calls.'],
-  ['full_access', 'Full access', 'Allow commands with the app’s user permissions and network access. MCP calls still prompt.'],
+  ['workspace', 'Workspace', 'Read the project and ask before edits, commands, MCP calls, and web requests.'],
+  ['full_access', 'Full access', 'Allow commands with the app’s user permissions and network access. MCP calls and web requests still prompt.'],
   ['custom', 'Custom', 'Choose which actions require approval.'],
 ];
 
 const profileRules = {
-  read_only: { read: 'allow', write: 'deny', command: 'deny', mcp: 'deny', network: false },
-  workspace: { read: 'allow', write: 'ask', command: 'ask', mcp: 'ask', network: false },
-  full_access: { read: 'allow', write: 'allow', command: 'allow', mcp: 'ask', network: true },
+  read_only: { read: 'allow', write: 'deny', command: 'deny', mcp: 'deny', web: 'deny', network: false },
+  workspace: { read: 'allow', write: 'ask', command: 'ask', mcp: 'ask', web: 'ask', network: false },
+  full_access: { read: 'allow', write: 'allow', command: 'allow', mcp: 'ask', web: 'ask', network: true },
 };
 
 const approvalOptions = [['ask', 'Ask every time'], ['deny', 'Deny']];
@@ -82,7 +83,7 @@ export function settingsPanel(api) {
       button(label, () => { tab = key; render(); }, {
         glyph, style: 'settings-tab' + (tab === key ? ' current' : ''),
       })));
-    const page = { providers, mcp, permissions, appearance, instructions, backups }[tab]();
+    const page = { providers, mcp, web, permissions, appearance, instructions, backups }[tab]();
     $('settings-content').replaceChildren(page);
   }
 
@@ -404,9 +405,54 @@ export function settingsPanel(api) {
     return formSection(adding ? 'New server' : server.name, '', form);
   }
 
+  function web() {
+    const data = api.data();
+    const saved = data.web_search;
+    let service = saved?.kind ?? '';
+    const cloud = data.providers.filter((provider) => provider.kind === 'ollama_cloud');
+    const endpoint = input(saved?.endpoint ?? '', { type: 'url', required: true, placeholder: 'http://127.0.0.1:8080/search', spellcheck: 'false' });
+    const provider = options(cloud.map((item) => [item.id, item.name]), saved?.provider ?? cloud[0]?.id);
+    const details = el('div', { class: 'wide' });
+    const status = el('div', { class: 'form-status', role: 'status' });
+    const save = el('button', { type: 'submit', class: 'button primary' }, 'Save web search');
+
+    function showService() {
+      details.replaceChildren();
+      if (service === 'searxng') details.append(field('SearXNG search URL', endpoint, 'Use a search endpoint with the JSON format enabled.'));
+      if (service === 'ollama') {
+        if (cloud.length) details.append(field('Ollama Cloud connection', provider, 'OpenDex uses the endpoint and credentials from this provider.'));
+        else details.append(button('Set up Ollama Cloud', () => {
+          newProviderKind = 'ollama_cloud';
+          open('providers');
+        }, { glyph: 'plus' }));
+      }
+      save.disabled = service === 'ollama' && !cloud.length;
+    }
+
+    const choice = options([['', 'Off'], ['searxng', 'SearXNG'], ['ollama', 'Ollama Cloud']], service, (value) => {
+      service = value;
+      showService();
+    });
+    showService();
+    const form = el('form', { class: 'form-grid', onsubmit: (event) => {
+      event.preventDefault();
+      run(save, status, async () => {
+        let value = null;
+        if (service === 'searxng') value = { kind: service, endpoint: endpoint.value.trim() };
+        if (service === 'ollama') value = { kind: service, provider: provider.value };
+        await api.invoke('save_web_search', { value });
+        await api.refresh();
+        status.textContent = 'Web search settings saved.';
+      });
+    } }, field('Search service', choice), details,
+    el('div', { class: 'form-actions wide' }, save, status));
+    return el('div', { class: 'settings-page' }, heading('Web search', 'Choose the service that receives search queries from your conversations.'),
+      formSection('Connection', 'Turn on Web search in a conversation’s composer to make it available to the model.', form));
+  }
+
   function permissions() {
     const value = structuredClone(api.data().permissions);
-    const page = el('div', { class: 'settings-page' }, heading('Permissions', 'Choose what Code Agent and MCP tools can do.'));
+    const page = el('div', { class: 'settings-page' }, heading('Permissions', 'Choose which tools can act and when they ask for approval.'));
     const picker = el('div', { class: 'profile-list' });
     const rules = el('div', { class: 'form-grid' });
     const steps = input(value.max_steps, { type: 'number', min: 1, max: 50 });
@@ -419,7 +465,7 @@ export function settingsPanel(api) {
       }, el('span', { class: 'choice-radio' }), el('span', {}, el('strong', {}, label), el('span', { class: 'muted' }, info)))));
       const effective = value.profile === 'custom' ? value : profileRules[value.profile];
       rules.replaceChildren(
-        ...[['read', 'Read workspace files'], ['write', 'Write workspace files'], ['command', 'Run local commands'], ['mcp', 'Use MCP servers']].map(([key, label]) =>
+        ...[['read', 'Read workspace files'], ['write', 'Write workspace files'], ['command', 'Run local commands'], ['mcp', 'Use MCP servers'], ['web', 'Search and fetch web pages']].map(([key, label]) =>
           field(label, options([['deny', 'Deny'], ['ask', 'Ask every time'], ['allow', 'Allow']], effective[key],
             (next) => { value[key] = next; }, { disabled: value.profile !== 'custom' }))),
         field('Maximum tool calls per turn', steps),

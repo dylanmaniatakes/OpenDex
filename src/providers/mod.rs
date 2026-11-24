@@ -34,7 +34,7 @@ pub fn client() -> Result<Client> {
         .build()?)
 }
 
-fn request(provider: &Provider, request: RequestBuilder) -> Result<RequestBuilder> {
+pub(crate) fn request(provider: &Provider, request: RequestBuilder) -> Result<RequestBuilder> {
     let secret = read_secret(
         provider.credential_id(),
         &provider.endpoint,

@@ -520,10 +520,32 @@ function messageActions(thread, message, lastVisible) {
   );
 }
 
+function webResult(message) {
+  if (!['web_search', 'web_fetch'].includes(message.tool_name)) return null;
+  let result;
+  try { result = JSON.parse(message.text); }
+  catch { return null; }
+  if (!Array.isArray(result?.sources)) return null;
+
+  const summary = message.tool_name === 'web_search'
+    ? `Web search · ${result.sources.length} ${result.sources.length === 1 ? 'source' : 'sources'}`
+    : 'Read web page';
+  return el('details', { class: 'tool-result web-result' },
+    el('summary', {}, icon('search', 15), summary),
+    el('div', { class: 'web-sources' },
+      result.query && el('p', { class: 'muted' }, result.query),
+      result.sources.length === 0 && el('p', { class: 'muted' }, 'No sources returned.'),
+      result.sources.map((source) => el('article', { class: 'web-source' },
+        button(source.title, transient(() => invoke('open_web_source', { url: source.url })),
+          { glyph: 'arrow', style: 'text-link', title: source.url }),
+        el('div', { class: 'muted source-url' }, source.url),
+        source.content && el('p', {}, source.content)))));
+}
+
 function messageCard(thread, message, lastVisible) {
   const user = message.role === 'user';
   if (message.role === 'tool') {
-    return el('details', { class: 'tool-result' }, el('summary', {}, icon('terminal', 15), message.tool_label ?? message.tool_name ?? 'Tool result'),
+    return webResult(message) ?? el('details', { class: 'tool-result' }, el('summary', {}, icon('terminal', 15), message.tool_label ?? message.tool_name ?? 'Tool result'),
       el('pre', {}, message.text));
   }
   if (!message.text && !message.attachments?.length && !message.resources?.length) return null;
@@ -687,6 +709,11 @@ function openMcpContext() {
   });
 }
 
+function webDenied() {
+  const policy = data.permissions;
+  return policy.profile === 'read_only' || (policy.profile === 'custom' && policy.web === 'deny');
+}
+
 function composer(thread) {
   const busy = Boolean(live());
   const draft = draftOf();
@@ -698,6 +725,9 @@ function composer(thread) {
   $('prompt').disabled = busy || !thread;
   $('attach').disabled = busy || !thread || draft.loadingFiles;
   $('mcp-context').disabled = busy || !thread;
+  const webSearch = $('web-search');
+  webSearch.disabled = busy || !thread;
+  webSearch.setAttribute('aria-pressed', String(Boolean(thread?.web_enabled && data.web_search && !webDenied())));
   $('send').replaceChildren(icon(busy ? 'stop' : 'send', 21));
   $('send').title = busy ? 'Stop response' : 'Send message';
   $('send').setAttribute('aria-label', $('send').title);
@@ -822,7 +852,7 @@ function onTurn({ thread: id, kind, details }) {
       if (id === active) status();
       break;
     case 'tool':
-      thread.messages.push({ role: 'tool', tool_label: details.name, text: details.output });
+      thread.messages.push({ role: 'tool', tool_label: details.name, tool_name: details.tool_name, text: details.output });
       turn.notice = details.success ? `Finished ${details.name}` : `${details.name} reported an error`;
       if (id === active) { timeline(thread); status(); }
       break;
@@ -839,6 +869,16 @@ function bind() {
   $('close-details').addEventListener('click', () => $('details').close());
   $('mcp-context').replaceChildren(icon('plug', 17));
   $('mcp-context').addEventListener('click', openMcpContext);
+  $('web-search').replaceChildren(icon('search', 17));
+  $('web-search').addEventListener('click', transient(async () => {
+    const thread = current();
+    if (!thread || live()) return;
+    if (!data.web_search) { settings.open('web'); return; }
+    if (webDenied()) { settings.open('permissions'); return; }
+    const updated = await invoke('edit_thread', { id: thread.id, changes: { web_enabled: !thread.web_enabled } });
+    updateThread(updated);
+    toast(updated.web_enabled ? 'Web search is on for this conversation.' : 'Web search is off for this conversation.');
+  }));
   $('attach').replaceChildren(icon('attach', 19));
   $('attach').addEventListener('click', transient(async () => {
     const id = active;

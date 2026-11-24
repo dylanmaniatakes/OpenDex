@@ -1,6 +1,7 @@
 use opendex::{
     backup,
     state::{McpScope, Message, Project, Provider, ProviderKind, Role, Rule, Store, Thread},
+    web::Config,
 };
 use serde_json::json;
 use std::{collections::HashMap, fs};
@@ -38,6 +39,10 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
                 root: folder.path().join("absent"),
             });
             data.appearance.theme = "light".into();
+            data.web_search = Some(Config::Searxng {
+                endpoint: "http://localhost:8080/search".into(),
+            });
+            data.permissions.web = Rule::Allow;
             data.instructions = "Archive fixture instructions".into();
             let thread: Thread = serde_json::from_value(json!({
                 "id":Uuid::new_v4(), "mode":"chat", "title":"Source chat",
@@ -75,6 +80,7 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     assert_eq!(preview.providers, ["Backup endpoint", "Login metadata"]);
     assert!(preview.has_chatgpt_connection);
     assert_eq!(preview.mcp_servers, ["MCP fixture"]);
+    assert_eq!(preview.web_search, Some("SearXNG"));
     assert!(!preview.projects[0].available);
     assert!(destination.snapshot().instructions.is_empty());
     let mapped = folder.path().join("mapped");
@@ -99,6 +105,8 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
         Rule::Deny
     );
     assert_eq!(restored.appearance.theme, "light");
+    assert_eq!(restored.web_search, source.snapshot().web_search);
+    assert_eq!(restored.permissions.web, Rule::Allow);
     assert_eq!(restored.instructions, "Archive fixture instructions");
 
     *ciphertext.last_mut().unwrap() ^= 1;
