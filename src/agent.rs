@@ -2,13 +2,14 @@
 use crate::{
     mcp::process_path,
     providers::Tool,
-    state::{Mode, Permissions, Profile, Rule},
+    state::{Attachment, Mode, Permissions, Profile, Rule},
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -21,6 +22,9 @@ use tokio::{
 };
 
 const MAX_FILE: u64 = 1024 * 1024;
+const MAX_MEDIA: u64 = 5 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES: u64 = 12 * 1024 * 1024;
+const MAX_ATTACHMENTS: usize = 8;
 const MAX_OUTPUT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy)]
@@ -163,20 +167,43 @@ fn text_file(path: &Path) -> Result<String> {
     Ok(text)
 }
 
-pub fn attachment(path: &Path) -> Result<crate::state::Attachment> {
-    let canonical = path
-        .canonicalize()
-        .context("The selected attachment is unavailable.")?;
+pub fn load_attachments(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, Attachment)>> {
+    ensure!(
+        paths.len() <= MAX_ATTACHMENTS,
+        "Attach up to eight files per message."
+    );
+    let mut seen = HashSet::new();
+    let mut total = 0;
+    let mut files = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .context("The selected file has no name.")?
+            .to_string_lossy();
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("Attachment {name} is unavailable."))?;
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+        let (attachment, bytes) = read_attachment(name.as_ref(), &canonical)
+            .with_context(|| format!("Could not attach {name}."))?;
+        total += bytes;
+        ensure!(
+            total <= MAX_ATTACHMENT_BYTES,
+            "Attachments can total up to 12 MiB."
+        );
+        files.push((path, attachment));
+    }
+    Ok(files)
+}
+
+fn read_attachment(name: &str, canonical: &Path) -> Result<(Attachment, u64)> {
     ensure!(
         canonical.symlink_metadata()?.is_file(),
         "Choose a regular file."
     );
-    let name = path
-        .file_name()
-        .context("The selected file has no name.")?
-        .to_string_lossy()
-        .into();
-    let mut file = fs::File::open(&canonical)?;
+    let mut file = fs::File::open(canonical)?;
     let mut header = [0; 12];
     let n = file.read(&mut header)?;
     let header = &header[..n];
@@ -193,18 +220,19 @@ pub fn attachment(path: &Path) -> Result<crate::state::Attachment> {
     } else {
         None
     };
+    let limit = if mime.is_some() { MAX_MEDIA } else { MAX_FILE };
+    let mut bytes = header.to_vec();
+    file.take(limit + 1 - n as u64).read_to_end(&mut bytes)?;
+    let size = bytes.len() as u64;
     let text = if mime.is_some() {
-        const MAX_MEDIA: u64 = 5 * 1024 * 1024;
-        let mut bytes = header.to_vec();
-        file.take(MAX_MEDIA + 1 - n as u64)
-            .read_to_end(&mut bytes)?;
         ensure!(
-            bytes.len() as u64 <= MAX_MEDIA,
+            size <= limit,
             "Image and PDF attachments can be up to 5 MiB."
         );
         STANDARD.encode(bytes)
     } else {
-        let text = text_file(&canonical)
+        ensure!(size <= limit, "Text attachments can be up to 1 MiB.");
+        let text = String::from_utf8(bytes)
             .context("Choose UTF-8 text, a PDF, a PNG, JPEG, GIF, or WebP image.")?;
         ensure!(
             !text.contains('\0'),
@@ -212,11 +240,14 @@ pub fn attachment(path: &Path) -> Result<crate::state::Attachment> {
         );
         text
     };
-    Ok(crate::state::Attachment {
-        name,
-        text,
-        media_type: mime.map(str::to_owned),
-    })
+    Ok((
+        Attachment {
+            name: name.into(),
+            text,
+            media_type: mime.map(str::to_owned),
+        },
+        size,
+    ))
 }
 
 fn trimmed(text: &str, limit: usize) -> String {

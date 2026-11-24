@@ -31,7 +31,7 @@ let navQueue = Promise.resolve();
 const current = () => data?.threads.find((thread) => thread.id === active);
 const live = () => turns.get(active);
 const draftOf = (id = active) => {
-  if (!drafts.has(id)) drafts.set(id, { text: '', attachment: null, resources: [] });
+  if (!drafts.has(id)) drafts.set(id, { text: '', attachments: [], resources: [] });
   return drafts.get(id);
 };
 
@@ -484,7 +484,7 @@ async function branchConversation(thread, message, action) {
 
 function editMessage(thread, message) {
   const text = el('textarea', { rows: 6, maxlength: 256000,
-    required: !message.attachment && !message.resources?.length }, message.text);
+    required: !message.attachments?.length && !message.resources?.length }, message.text);
   const submit = el('button', { type: 'submit', class: 'button primary' }, 'Send edited message');
   const status = el('p', { class: 'status-error', role: 'status' });
   const form = el('form', { class: 'details-form', onsubmit: async (event) => {
@@ -526,7 +526,7 @@ function messageCard(thread, message, lastVisible) {
     return el('details', { class: 'tool-result' }, el('summary', {}, icon('terminal', 15), message.tool_label ?? message.tool_name ?? 'Tool result'),
       el('pre', {}, message.text));
   }
-  if (!message.text && !message.attachment && !message.resources?.length) return null;
+  if (!message.text && !message.attachments?.length && !message.resources?.length) return null;
   const body = user ? el('div', { class: 'user-text' }, message.text) : markdown(message.text, copy);
   const meta = user ? null : el('div', { class: 'assistant-meta' },
     el('span', { class: 'brand-symbol tiny', 'aria-hidden': 'true' }),
@@ -534,11 +534,13 @@ function messageCard(thread, message, lastVisible) {
     message.incomplete && el('span', { class: 'muted' }, '· Partial response'));
   return el('article', { class: 'message ' + (user ? 'user' : 'assistant') }, meta,
     el('div', { class: 'message-content' }, body,
-      message.attachment && el('div', { class: 'chip file-chip' }, icon('note', 15), message.attachment.name),
-      message.attachment?.media_type?.startsWith('image/') && el('img', {
-        class: 'preview-image', src: 'data:' + message.attachment.media_type + ';base64,' + message.attachment.text,
-        alt: message.attachment.name, loading: 'lazy',
-      }),
+      message.attachments?.length > 0 && el('div', { class: 'message-attachments' },
+        message.attachments.map((file) => el('div', {},
+          el('div', { class: 'chip file-chip' }, icon('note', 15), file.name),
+          file.media_type?.startsWith('image/') && el('img', {
+            class: 'preview-image', src: 'data:' + file.media_type + ';base64,' + file.text,
+            alt: file.name, loading: 'lazy',
+          })))),
       message.resources?.map((resource) => el('details', { class: 'tool-result message-resource' },
         el('summary', {}, icon('plug', 15), resource.name, el('small', {}, ' · ' + resource.source)),
         el('pre', {}, resource.text)))),
@@ -560,7 +562,7 @@ function timeline(thread, forced = false) {
   const turn = live();
   const messages = thread?.messages ?? [];
   const lastVisible = messages.findLast((message) => message.role !== 'tool' &&
-    (message.text || message.attachment || message.resources?.length));
+    (message.text || message.attachments?.length || message.resources?.length));
   const items = messages.map((message) => messageCard(thread, message, lastVisible === message)).filter(Boolean);
   if (turn?.stream) {
     items.push(el('article', { class: 'message assistant' },
@@ -599,23 +601,53 @@ function status() {
   else if (drafts.get(active)?.notice) node.append(el('p', { class: 'live-status' }, drafts.get(active).notice));
 }
 
-function attachment() {
+function renderAttachments() {
   const draft = draftOf();
-  const items = [];
-  if (draft.attachment) {
-    items.push(el('div', { class: 'chip file-chip' }, icon('note', 15), draft.attachment.name,
-      button('Remove attachment', () => { draft.attachment = null; attachment(); }, { glyph: 'close', onlyIcon: true, style: 'icon-button small' })));
-  }
+  const items = draft.attachments.map((file) => el('div', { class: 'chip file-chip' },
+    icon('note', 15), file.name,
+    button('Remove ' + file.name, () => {
+      draft.attachments = draft.attachments.filter((item) => item !== file);
+      renderAttachments();
+    }, { glyph: 'close', onlyIcon: true, style: 'icon-button small', disabled: draft.loadingFiles })));
   for (const resource of draft.resources) {
     items.push(el('div', { class: 'chip file-chip', title: resource.source + ' · ' + resource.uri },
       icon('plug', 15), resource.name,
       button('Remove ' + resource.name, () => {
         draft.resources = draft.resources.filter((item) => item !== resource);
-        attachment();
+        renderAttachments();
       }, { glyph: 'close', onlyIcon: true, style: 'icon-button small' })));
   }
   $('attachment-row').hidden = items.length === 0;
   $('attachment-row').replaceChildren(...items);
+}
+
+async function addAttachments(id, paths) {
+  if (!id || !paths.length || turns.has(id)) return;
+  const draft = draftOf(id);
+  if (draft.loadingFiles) return;
+  draft.loadingFiles = true;
+  if (id === active) composer(current());
+  try {
+    const all = [...new Set([...draft.attachments.map((file) => file.path), ...paths])];
+    draft.attachments = await invoke('inspect_attachments', { paths: all });
+  } finally {
+    draft.loadingFiles = false;
+    if (id === active) composer(current());
+  }
+}
+
+function handleAttachmentDrop({ payload }) {
+  const composer = $('composer');
+  const rect = composer.getBoundingClientRect();
+  const { position, type } = payload;
+  // Wry uses logical coordinates on Cocoa and GTK, and Win32 client pixels on Windows.
+  const scale = navigator.platform.startsWith('Win') ? window.devicePixelRatio : 1;
+  const x = position?.x / scale;
+  const y = position?.y / scale;
+  const inside = Boolean(position && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
+  const allowed = inside && current() && !live() && !draftOf().loadingFiles && !$('settings').open && !$('details').open;
+  composer.classList.toggle('drag-over', Boolean(allowed && (type === 'enter' || type === 'over')));
+  if (allowed && type === 'drop') addAttachments(active, payload.paths).catch((error) => toast(String(error), true));
 }
 
 function openMcpContext() {
@@ -637,7 +669,7 @@ function openMcpContext() {
       if (resources.length >= 8) { toast('Attach up to eight MCP resources per message.', true); return; }
       draft.resources = [...resources, resource];
       close();
-      if (active === thread.id) { attachment(); $('prompt').focus(); }
+      if (active === thread.id) { renderAttachments(); $('prompt').focus(); }
     },
     insertPrompt: (messages) => {
       const draft = draftOf(thread.id);
@@ -657,19 +689,20 @@ function openMcpContext() {
 
 function composer(thread) {
   const busy = Boolean(live());
+  const draft = draftOf();
   if ($('prompt').dataset.thread !== thread?.id) {
-    $('prompt').value = draftOf().text;
+    $('prompt').value = draft.text;
     $('prompt').dataset.thread = thread?.id ?? '';
   }
   $('prompt').placeholder = modes[mode].placeholder;
   $('prompt').disabled = busy || !thread;
-  $('attach').disabled = busy || !thread;
+  $('attach').disabled = busy || !thread || draft.loadingFiles;
   $('mcp-context').disabled = busy || !thread;
   $('send').replaceChildren(icon(busy ? 'stop' : 'send', 21));
   $('send').title = busy ? 'Stop response' : 'Send message';
   $('send').setAttribute('aria-label', $('send').title);
-  $('send').disabled = !thread;
-  attachment();
+  $('send').disabled = !thread || draft.loadingFiles;
+  renderAttachments();
   modelPicker(thread);
   status();
 }
@@ -729,15 +762,15 @@ async function send(event) {
   if (!thread) return;
   if (live()) { await invoke('stop_turn', { id: thread.id }); return; }
   const draft = draftOf();
-  if (!draft.text.trim() && !draft.attachment && !draft.resources.length) return;
+  if (draft.loadingFiles || (!draft.text.trim() && !draft.attachments.length && !draft.resources.length)) return;
   if (!hasSelectedModel(thread)) return;
-  const submitted = { text: draft.text, attachment: draft.attachment, resources: draft.resources };
+  const submitted = { text: draft.text, attachments: draft.attachments, resources: draft.resources };
   draft.text = '';
-  draft.attachment = null;
+  draft.attachments = [];
   draft.resources = [];
   $('prompt').value = '';
   await generateReply(thread, 'send_message', {
-    prompt: { thread: thread.id, text: submitted.text, attachment: submitted.attachment?.path ?? null, resources: submitted.resources },
+    prompt: { thread: thread.id, text: submitted.text, attachments: submitted.attachments.map((file) => file.path), resources: submitted.resources },
   }, () => {
     Object.assign(draft, submitted);
     if (thread.id === active) $('prompt').value = draft.text;
@@ -809,11 +842,8 @@ function bind() {
   $('attach').replaceChildren(icon('attach', 19));
   $('attach').addEventListener('click', transient(async () => {
     const id = active;
-    const path = await io.open({ multiple: false, title: 'Attach a file' });
-    if (!path) return;
-    const file = await invoke('load_attachment', { path });
-    draftOf(id).attachment = { path, name: file.name };
-    if (id === active) attachment();
+    const paths = await io.open({ multiple: true, title: 'Attach files' });
+    if (paths) await addAttachments(id, Array.isArray(paths) ? paths : [paths]);
   }));
   $('toggle-sidebar').replaceChildren(icon('panel', 19));
   $('toggle-sidebar').addEventListener('click', () => {
@@ -857,6 +887,7 @@ async function boot() {
   bind();
   await tauri.event.listen('opendex-turn', ({ payload }) => onTurn(payload));
   await tauri.event.listen('opendex-connection', ({ payload }) => settings.accountConnection(payload));
+  await tauri.webview.getCurrentWebview().onDragDropEvent(handleAttachmentDrop);
   await refresh();
   if (current()) {
     mode = current().mode;

@@ -2,7 +2,7 @@ use opendex::{
     codex::Bridge,
     mcp::Connection,
     providers::{self, Tool},
-    state::{Message, Provider, ProviderKind, Role, Server, Transport},
+    state::{Attachment, Message, Provider, ProviderKind, Role, Server, Transport},
 };
 use serde_json::{Value, json};
 use std::{
@@ -98,6 +98,105 @@ fn tool() -> Tool {
         description: "Read an example file".into(),
         schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
     }
+}
+
+#[tokio::test]
+async fn mixed_attachments_reach_provider_wire_formats_in_order() {
+    let fixture = Fixture::new(4, |request| {
+        let (content, kinds, reply, mime) = match request.line.split_whitespace().nth(1).unwrap() {
+            "/api-prefix/responses" => (
+                &request.body["input"][0]["content"],
+                ["input_text", "input_image", "input_file", "input_image"],
+                response(&[
+                    json!({"type":"response.output_text.delta","delta":"received"}),
+                    json!({"type":"response.completed"}),
+                ]),
+                "text/event-stream",
+            ),
+            "/api-prefix/messages" => (
+                &request.body["messages"][0]["content"],
+                ["text", "image", "document", "image"],
+                response(&[
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"received"}}),
+                    json!({"type":"message_stop"}),
+                ]),
+                "text/event-stream",
+            ),
+            "/api-prefix/chat/completions" => (
+                &request.body["messages"][0]["content"],
+                ["text", "image_url", "file", "image_url"],
+                response(&[
+                    json!({"choices":[{"delta":{"content":"received"},"finish_reason":"stop"}]}),
+                ]),
+                "text/event-stream",
+            ),
+            "/api-prefix/chat" => {
+                let user = &request.body["messages"][0];
+                assert_eq!(user["images"], json!(["Zmlyc3Q=", "c2Vjb25k"]));
+                assert!(
+                    user["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Text attachment example")
+                );
+                return (
+                    "application/x-ndjson",
+                    String::new(),
+                    json!({"message":{"content":"received"},"done":true}).to_string(),
+                );
+            }
+            other => panic!("unexpected provider route {other}"),
+        };
+        let content = content.as_array().unwrap();
+        assert_eq!(content.len(), 4);
+        for (part, kind) in content.iter().zip(kinds) {
+            assert_eq!(part["type"], kind);
+        }
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Text attachment example")
+        );
+        for (part, expected) in content[1..]
+            .iter()
+            .zip(["Zmlyc3Q=", "JVBERg==", "c2Vjb25k"])
+        {
+            assert!(part.to_string().contains(expected));
+        }
+        (mime, String::new(), reply)
+    });
+    let client = providers::client().unwrap();
+    for kind in [
+        ProviderKind::OpenAi,
+        ProviderKind::Anthropic,
+        ProviderKind::OpenAiCompatible,
+        ProviderKind::Ollama,
+    ] {
+        let mut message = Message::new(Role::User, "Check these attachments.");
+        message.attachments = [
+            ("notes.txt", "Text attachment example", None),
+            ("first.png", "Zmlyc3Q=", Some("image/png")),
+            ("handbook.pdf", "JVBERg==", Some("application/pdf")),
+            ("second.jpg", "c2Vjb25k", Some("image/jpeg")),
+        ]
+        .into_iter()
+        .filter(|(_, _, mime)| kind != ProviderKind::Ollama || *mime != Some("application/pdf"))
+        .map(|(name, text, media_type)| Attachment {
+            name: name.into(),
+            text: text.into(),
+            media_type: media_type.map(str::to_owned),
+        })
+        .collect();
+        let mut connection = provider(&fixture, kind);
+        connection.headers = vec![("x-opendex-test".into(), "PATH".into())];
+        let result =
+            providers::generate(&client, &connection, "fixture", "", &[message], &[], |_| {})
+                .await
+                .unwrap();
+        assert_eq!(result.text, "received");
+    }
+    fixture.finish();
 }
 
 #[tokio::test]
@@ -625,6 +724,11 @@ async fn native_gemini_replays_signed_parallel_and_sequential_calls() {
             "application/pdf"
         );
         assert_eq!(contents[0]["parts"][1]["inlineData"]["data"], "JVBERg==");
+        assert_eq!(
+            contents[0]["parts"][2]["inlineData"]["mimeType"],
+            "image/png"
+        );
+        assert_eq!(contents[0]["parts"][2]["inlineData"]["data"], "aW1hZ2U=");
         let candidate = |parts: Value| json!({"candidates":[{"content":{"role":"model","parts":parts},"index":0}]});
         let finish = json!({"candidates":[{"index":0,"finishReason":"STOP"}]});
         let chunks = match contents.len() {
@@ -671,10 +775,15 @@ async fn native_gemini_replays_signed_parallel_and_sequential_calls() {
     let client = providers::client().unwrap();
     let spec = [tool()];
     let mut user = Message::new(Role::User, "Compare these files.");
-    user.attachment = Some(opendex::state::Attachment {
+    user.attachments.push(Attachment {
         name: "notes.pdf".into(),
         text: "JVBERg==".into(),
         media_type: Some("application/pdf".into()),
+    });
+    user.attachments.push(Attachment {
+        name: "chart.png".into(),
+        text: "aW1hZ2U=".into(),
+        media_type: Some("image/png".into()),
     });
     let mut history = vec![user];
     for outputs in [

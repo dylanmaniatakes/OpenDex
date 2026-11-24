@@ -1,5 +1,5 @@
 use super::{Completion, Tool};
-use crate::state::{Message, Provider, ProviderKind as Kind, Role, ToolCall};
+use crate::state::{Attachment, Message, Provider, ProviderKind as Kind, Role, ToolCall};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value as V, json};
 use std::collections::BTreeMap;
@@ -16,20 +16,38 @@ fn function(tool: &Tool) -> V {
     json!({"name":tool.name,"description":tool.description,"parameters":tool.schema})
 }
 
+fn parts(message: &Message, text_type: &str, media_part: impl Fn(&Attachment, &str) -> V) -> V {
+    let text = message.content();
+    let mut media = message.media_attachments().peekable();
+    if media.peek().is_none() {
+        return json!(text);
+    }
+    let mut content = vec![json!({"type":text_type,"text":text})];
+    content.extend(media.map(|(file, mime)| media_part(file, mime)));
+    json!(content)
+}
+
 fn completion_message(message: &Message, ollama: bool) -> V {
-    let mut item = json!({"role":tag(message.role),"content":message.content()});
-    if let Some(file) = &message.attachment
-        && let Some(mime) = &file.media_type
-    {
-        if ollama && mime.starts_with("image/") {
-            item["images"] = json!([file.text]);
-        } else if !ollama {
-            let part = if mime == "application/pdf" {
+    let content = if ollama {
+        json!(message.content())
+    } else {
+        parts(message, "text", |file, mime| {
+            if mime == "application/pdf" {
                 json!({"type":"file","file":{"filename":file.name,"file_data":file.data_url()}})
             } else {
                 json!({"type":"image_url","image_url":{"url":file.data_url()}})
-            };
-            item["content"] = json!([{"type":"text","text":message.content()}, part]);
+            }
+        })
+    };
+    let mut item = json!({"role":tag(message.role),"content":content});
+    if ollama {
+        let images: Vec<_> = message
+            .media_attachments()
+            .filter(|(_, mime)| mime.starts_with("image/"))
+            .map(|(file, _)| &file.text)
+            .collect();
+        if !images.is_empty() {
+            item["images"] = json!(images);
         }
     }
     if message.role == Role::Tool {
@@ -74,17 +92,13 @@ pub(super) fn payload(
                     continue;
                 }
                 if message.has_content() {
-                    let mut content = json!(message.content());
-                    if let Some(file) = &message.attachment
-                        && let Some(mime) = &file.media_type
-                    {
-                        let part = if mime == "application/pdf" {
+                    let content = parts(message, "input_text", |file, mime| {
+                        if mime == "application/pdf" {
                             json!({"type":"input_file","filename":file.name,"file_data":file.data_url()})
                         } else {
                             json!({"type":"input_image","detail":"auto","image_url":file.data_url()})
-                        };
-                        content = json!([{"type":"input_text","text":message.content()},part]);
-                    }
+                        }
+                    });
                     input.push(json!({"role":tag(message.role),"content":content}));
                 }
                 for call in &message.calls {
@@ -132,9 +146,7 @@ pub(super) fn payload(
                 if message.has_content() {
                     blocks.push(json!({"type":"text","text":message.content()}));
                 }
-                if let Some(file) = &message.attachment
-                    && let Some(mime) = &file.media_type
-                {
+                for (file, mime) in message.media_attachments() {
                     let kind = if mime == "application/pdf" {
                         "document"
                     } else {

@@ -288,14 +288,10 @@ impl Bridge {
             )
         };
         let mut input = vec![json!({"type":"text","text":input,"text_elements":[]})];
-        for file in messages
+        for (file, _) in messages
             .iter()
-            .filter_map(|message| message.attachment.as_ref())
-            .filter(|file| {
-                file.media_type
-                    .as_deref()
-                    .is_some_and(|mime| mime.starts_with("image/"))
-            })
+            .flat_map(Message::media_attachments)
+            .filter(|(_, mime)| mime.starts_with("image/"))
         {
             input.push(json!({"type":"image","url":file.data_url()}));
         }

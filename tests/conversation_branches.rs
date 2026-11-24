@@ -15,10 +15,15 @@ fn thread(messages: Vec<Message>) -> Thread {
 #[test]
 fn editing_keeps_attachments_and_leaves_the_source_intact() {
     let mut prompt = Message::new(Role::User, "Original question");
-    prompt.attachment = Some(Attachment {
+    prompt.attachments.push(Attachment {
         name: "context.txt".into(),
         text: "Saved file snapshot".into(),
         media_type: None,
+    });
+    prompt.attachments.push(Attachment {
+        name: "diagram.png".into(),
+        text: "fixture-image".into(),
+        media_type: Some("image/png".into()),
     });
     prompt.resources.push(McpResource {
         server_id: Uuid::new_v4(),
@@ -49,6 +54,8 @@ fn editing_keeps_attachments_and_leaves_the_source_intact() {
     assert_ne!(branch.messages[0].id, id);
     assert_eq!(branch.messages[0].text, "Revised question");
     assert!(branch.messages[0].content().contains("Saved file snapshot"));
+    assert_eq!(branch.messages[0].attachments.len(), 2);
+    assert_eq!(branch.messages[0].attachments[1].text, "fixture-image");
     assert!(
         branch.messages[0]
             .content()
@@ -56,6 +63,20 @@ fn editing_keeps_attachments_and_leaves_the_source_intact() {
     );
     assert_eq!(source.messages.len(), 3);
     assert_eq!(source.messages[0].text, "Original question");
+}
+
+#[test]
+fn legacy_single_attachments_load_and_serialize_as_a_list() {
+    let message: Message = serde_json::from_value(json!({
+        "role":"user", "text":"",
+        "attachment":{"name":"legacy.md","text":"Preserved context"}
+    }))
+    .unwrap();
+    assert!(message.has_content());
+    assert_eq!(message.attachments[0].name, "legacy.md");
+    let stored = serde_json::to_value(&message).unwrap();
+    assert!(stored.get("attachment").is_none());
+    assert_eq!(stored["attachments"][0]["text"], "Preserved context");
 }
 
 #[test]

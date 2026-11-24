@@ -10,7 +10,9 @@ I built OpenDex to use the models I choose for everyday chat and coding. It runs
 4. Use **Discover models** to browse an endpoint’s inventory, or enter a model ID manually. Each model I add appears in both modes. Ollama Cloud has its own searchable catalog and uses an Ollama API key.
 5. Use the sidebar dropdown to switch between **Model Chat** and **Code Agent**. Model Chat shows its conversations. In Code Agent, use **Add project** to choose a folder, then use the plus button beside a project to create another thread in it.
 
-I can rename or export each conversation, attach a file, and set instructions globally or per thread. Both modes stream replies, and the stop button interrupts the active turn. Images and PDFs require a model and endpoint that accept them.
+I can rename or export each conversation and set instructions globally or per thread. Both modes stream replies, and the stop button interrupts the active turn.
+
+In either composer, I can attach several files at once or drop them onto the message box. I can remove files individually before sending. Each message can include up to eight files totaling 12 MiB, with up to 1 MiB per UTF-8 text file and 5 MiB per image or PDF. Images and PDFs require a model and endpoint that accept them.
 
 In **Model Chat**, I can edit a user message or retry a reply. Both actions create a branch using the history through the original prompt, with its saved attachments. I can also use **Branch from here** in either mode to continue through a selected message. I can return to the source under **Conversation settings → Open original conversation**. Code Agent branches use the selected project folder, and I can create a separate worktree for isolated changes.
 
@@ -91,6 +93,8 @@ I use loopback fixtures to test each wire format and MCP transport without accou
 I verified conversation-level MCP selection with two loopback servers in the macOS app. I declined and approved individual tool calls under a globally permissive profile, checked that a denied tool stayed out of the model request, and ran a Code Agent conversation with an empty selection.
 
 I exported and restored an encrypted settings backup between two local data folders in the macOS app. I kept the destination conversation, remapped a project folder, and confirmed that the restored Keychain entries authenticated requests to a model fixture and an MCP fixture. Automated tests cover wrong passphrases, tampering, and changes to the file after preview.
+
+I tested selecting several attachments in Model Chat, removing one, and verifying that the text and image reached a local model endpoint fixture. I edited that message after moving the source files and verified that the branch sent the saved copies. I also dragged a file from Finder into a Code Agent thread and confirmed that the endpoint received it.
 
 ### Source layout
 

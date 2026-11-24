@@ -1,6 +1,6 @@
 //! Persistent app data. Credentials stay in the system credential store.
 use anyhow::{Context, Result, bail, ensure};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -455,10 +455,33 @@ pub struct Message {
     pub provider: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attachment: Option<Attachment>,
+    #[serde(
+        default,
+        alias = "attachment",
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub attachments: Vec<Attachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<McpResource>,
+}
+
+/// Older workspace files and send requests can contain a single attachment.
+pub(crate) fn one_or_many<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored<T> {
+        Many(Vec<T>),
+        One(Option<T>),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::Many(items) => items,
+        Stored::One(item) => item.into_iter().collect(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -492,18 +515,20 @@ impl Message {
             tool_label: None,
             provider: None,
             model: None,
-            attachment: None,
+            attachments: vec![],
             resources: vec![],
         }
     }
 
     pub fn has_content(&self) -> bool {
-        !self.text.is_empty() || self.attachment.is_some() || !self.resources.is_empty()
+        !self.text.is_empty() || !self.attachments.is_empty() || !self.resources.is_empty()
     }
 
     pub fn validate_user_content(&self) -> Result<()> {
         ensure!(
-            !self.text.trim().is_empty() || self.attachment.is_some() || !self.resources.is_empty(),
+            !self.text.trim().is_empty()
+                || !self.attachments.is_empty()
+                || !self.resources.is_empty(),
             "Write a message or attach a file or resource."
         );
         ensure!(
@@ -513,18 +538,26 @@ impl Message {
         Ok(())
     }
 
+    pub fn media_attachments(&self) -> impl Iterator<Item = (&Attachment, &str)> {
+        self.attachments
+            .iter()
+            .filter_map(|file| file.media_type.as_deref().map(|mime| (file, mime)))
+    }
+
     pub fn content(&self) -> String {
         use std::fmt::Write as _;
-        let mut content = match &self.attachment {
-            Some(attachment) if attachment.media_type.is_some() => {
-                format!("{}\n\n[Attached: {}]", self.text, attachment.name)
+        let mut content = self.text.clone();
+        for attachment in &self.attachments {
+            if attachment.media_type.is_some() {
+                let _ = write!(content, "\n\n[Attached: {}]", attachment.name);
+            } else {
+                let _ = write!(
+                    content,
+                    "\n\n<user_attachment name={:?}>\n{}\n</user_attachment>",
+                    attachment.name, attachment.text
+                );
             }
-            Some(attachment) => format!(
-                "{}\n\n<user_attachment name={:?}>\n{}\n</user_attachment>",
-                self.text, attachment.name, attachment.text
-            ),
-            None => self.text.clone(),
-        };
+        }
         for resource in &self.resources {
             let _ = write!(
                 content,

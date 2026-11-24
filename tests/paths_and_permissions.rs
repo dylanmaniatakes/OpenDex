@@ -8,6 +8,30 @@ use tempfile::tempdir;
 use uuid::Uuid;
 
 #[test]
+fn file_attachments_keep_order_and_enforce_a_combined_limit() {
+    let directory = tempdir().unwrap();
+    let text = directory.path().join("notes.txt");
+    let image = directory.path().join("graph.png");
+    fs::write(&text, "Notes for the graph").unwrap();
+    fs::write(&image, b"\x89PNG\r\n\x1a\nfixture").unwrap();
+    let files = agent::load_attachments(vec![text.clone(), image.clone(), text.clone()]).unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].1.text, "Notes for the graph");
+    assert_eq!(files[1].1.media_type.as_deref(), Some("image/png"));
+    assert!(agent::load_attachments(vec![text; 9]).is_err());
+
+    let mut large_image = b"\x89PNG\r\n\x1a\n".to_vec();
+    large_image.resize(5 * 1024 * 1024, 0);
+    let second = directory.path().join("second.png");
+    let third = directory.path().join("third.png");
+    for path in [&image, &second, &third] {
+        fs::write(path, &large_image).unwrap();
+    }
+    let error = agent::load_attachments(vec![image, second, third]).unwrap_err();
+    assert!(error.to_string().contains("12 MiB"));
+}
+
+#[test]
 fn mcp_tool_rules_only_narrow_the_profile_and_preserve_legacy_blocks() {
     let mut server: Server = serde_json::from_value(json!({
         "id": Uuid::new_v4(), "name": "Fixture", "transport": "http",

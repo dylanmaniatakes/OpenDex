@@ -82,9 +82,7 @@ fn content_parts(message: &Message) -> Vec<Value> {
     if message.has_content() {
         parts.push(json!({"text":message.content()}));
     }
-    if let Some(file) = &message.attachment
-        && let Some(mime) = &file.media_type
-    {
+    for (file, mime) in message.media_attachments() {
         parts.push(json!({"inlineData":{"mimeType":mime,"data":file.text}}));
     }
     parts

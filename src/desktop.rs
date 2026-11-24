@@ -8,7 +8,7 @@ use crate::{
     state::{
         Appearance, BranchAction, Data, MAX_RESOURCE_BYTES, MAX_RESOURCES_PER_MESSAGE, McpResource,
         McpScope, Message, Mode, Permissions, Project, Provider, ProviderKind, Role, Rule, Server,
-        Store, Thread, ToolCall, Transport, delete_secret, write_secret,
+        Store, Thread, ToolCall, Transport, delete_secret, one_or_many, write_secret,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -688,10 +688,28 @@ fn remove_thread(app: AppState<'_>, id: Uuid) -> Reply<()> {
     })())
 }
 
+#[derive(Serialize)]
+struct AttachmentPreview {
+    path: PathBuf,
+    name: String,
+}
+
 #[tauri::command]
-fn load_attachment(path: PathBuf) -> Reply<Value> {
+async fn inspect_attachments(paths: Vec<PathBuf>) -> Reply<Vec<AttachmentPreview>> {
     reply(
-        agent::attachment(&path).map(|file| json!({"name":file.name,"media_type":file.media_type})),
+        async {
+            tauri::async_runtime::spawn_blocking(move || {
+                Ok(agent::load_attachments(paths)?
+                    .into_iter()
+                    .map(|(path, file)| AttachmentPreview {
+                        path,
+                        name: file.name,
+                    })
+                    .collect())
+            })
+            .await?
+        }
+        .await,
     )
 }
 
@@ -1192,7 +1210,8 @@ async fn complete_turn(
 struct Prompt {
     thread: Uuid,
     text: String,
-    attachment: Option<PathBuf>,
+    #[serde(default, alias = "attachment", deserialize_with = "one_or_many")]
+    attachments: Vec<PathBuf>,
     #[serde(default)]
     resources: Vec<McpResource>,
 }
@@ -1289,11 +1308,15 @@ async fn run_user_turn(
         TurnInput::New(prompt) => {
             validate_resources(&data, thread, &prompt.resources)?;
             let mut message = Message::new(Role::User, prompt.text.trim());
-            message.attachment = prompt
-                .attachment
-                .as_deref()
-                .map(agent::attachment)
-                .transpose()?;
+            if !prompt.attachments.is_empty() {
+                message.attachments = tauri::async_runtime::spawn_blocking(move || {
+                    agent::load_attachments(prompt.attachments)
+                })
+                .await??
+                .into_iter()
+                .map(|(_, file)| file)
+                .collect();
+            }
             message.resources = prompt.resources;
             message
         }
@@ -1311,18 +1334,14 @@ async fn run_user_turn(
         }
     };
     message.validate_user_content()?;
-    if message
-        .attachment
-        .as_ref()
-        .is_some_and(|file| file.media_type.as_deref() == Some("application/pdf"))
+    if matches!(
+        provider.kind,
+        ProviderKind::Ollama | ProviderKind::OllamaCloud | ProviderKind::ChatGptAccount
+    ) && let Some((file, _)) = message
+        .media_attachments()
+        .find(|(_, mime)| *mime == "application/pdf")
     {
-        ensure!(
-            !matches!(
-                provider.kind,
-                ProviderKind::Ollama | ProviderKind::OllamaCloud | ProviderKind::ChatGptAccount
-            ),
-            "Choose a PDF-capable API provider for this attachment."
-        );
+        bail!("Choose a PDF-capable API provider for {}.", file.name);
     }
     let thread = if new_message {
         app.store.change(|data| {
@@ -1332,7 +1351,7 @@ async fn run_user_turn(
                     .text
                     .lines()
                     .find(|line| !line.trim().is_empty())
-                    .or_else(|| message.attachment.as_ref().map(|file| file.name.as_str()))
+                    .or_else(|| message.attachments.first().map(|file| file.name.as_str()))
                     .or_else(|| {
                         message
                             .resources
@@ -1466,7 +1485,7 @@ pub fn run() {
             branch_thread,
             set_active,
             remove_thread,
-            load_attachment,
+            inspect_attachments,
             export_thread,
             review_changes,
             add_worktree,
