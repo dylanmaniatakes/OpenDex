@@ -233,6 +233,20 @@ async fn response(request: RequestBuilder, searxng: bool) -> Result<Value> {
             "SearXNG returned HTTP 403. Check that JSON is enabled in search.formats and that the server allows access from this computer."
         );
     }
+    if searxng {
+        match response.status() {
+            reqwest::StatusCode::UNAUTHORIZED => bail!(
+                "SearXNG returned HTTP 401. The instance or reverse proxy requires authentication."
+            ),
+            reqwest::StatusCode::TOO_MANY_REQUESTS => bail!(
+                "SearXNG returned HTTP 429. The instance rate-limited this computer. Retry later or check its limiter settings."
+            ),
+            status if status.is_redirection() => bail!(
+                "SearXNG redirected the request (HTTP {status}). Enter the final search URL, including its reverse-proxy path."
+            ),
+            _ => {}
+        }
+    }
     ensure!(
         response.status().is_success(),
         "The web service returned HTTP {}.",
@@ -250,7 +264,11 @@ async fn response(request: RequestBuilder, searxng: bool) -> Result<Value> {
         );
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).context("The web service response was not JSON.")
+    serde_json::from_slice(&bytes).context(if searxng {
+        "SearXNG did not return JSON. Check the search URL, enable json in search.formats, and check whether the reverse proxy shows a login page."
+    } else {
+        "The web service response was not JSON."
+    })
 }
 
 fn source(item: &Value, url: String, limit: usize) -> Source {
@@ -264,5 +282,46 @@ fn source(item: &Value, url: String, limit: usize) -> Source {
         },
         url,
         content: content.chars().take(limit).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    #[tokio::test]
+    async fn searxng_errors_explain_instance_and_proxy_failures() {
+        for (status, body, expected) in [
+            ("401 Unauthorized", "", "requires authentication"),
+            ("403 Forbidden", "", "search.formats"),
+            ("429 Too Many Requests", "", "rate-limited"),
+            ("302 Found", "", "final search URL"),
+            ("200 OK", "<html>Sign in</html>", "did not return JSON"),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/search", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(&stream);
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            let client = providers::client().unwrap();
+            let error = response(client.get(url), true).await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{error:#}");
+            server.join().unwrap();
+        }
     }
 }

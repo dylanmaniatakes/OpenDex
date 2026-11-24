@@ -62,6 +62,8 @@ In **Settings → Web search**, I can point OpenDex at a SearXNG search URL with
 
 For my self-hosted SearXNG instance, I enter its search URL, such as `https://search.example.org/search`, including any path used by my reverse proxy. **Test search** sends the query “OpenDex” and reports whether the server returned results. If the server returns HTTP 403, I check that `json` is enabled in `search.formats` and that the server allows access from this computer. [SearXNG search settings](https://docs.searxng.org/admin/settings/settings_search.html#formats)
 
+If my instance returns HTTP 401, I check the reverse proxy’s authentication. For HTTP 429, I wait before retrying or check the instance’s limiter settings. A redirect means I need to enter the final search URL. If a proxy returns an HTML login page, OpenDex reports that the response was not JSON.
+
 I turn on **Web search** in the composer for each conversation where I want it. The approval prompt shows the query or page URL before OpenDex sends it. **Custom → Search and fetch web pages** controls when I’m asked. The conversation keeps the titles, URLs, and excerpts returned by the service, and I can open those sources in my browser.
 
 ## Image generation
