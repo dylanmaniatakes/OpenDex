@@ -65,4 +65,8 @@ if [[ -e "$destination" ]] && [[ ! -f "$destination/Contents/MacOS/opendex" ]]; 
 fi
 /usr/bin/ditto --norsrc --noextattr --noqtn "$bundle" "$destination"
 codesign --verify --strict "$destination"
+
+build_manifest="$output/OpenDex-build.json"
+version="$(python3 -c 'import json; print(json.load(open("tauri.conf.json"))["version"])')"
+python3 scripts/build-manifest.py "$build_manifest" "$destination" "$version" "$profile"
 printf '%s\n' "$destination"

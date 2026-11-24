@@ -103,7 +103,7 @@ cargo run --locked
 bash scripts/bundle-macos.sh
 ```
 
-The bundling script writes `dist/OpenDex.app` and applies a local ad-hoc signature. Finder can launch the preview on the Mac that built it. Developer ID signing and notarization are release tasks. The Rust and Tauri code leave room for Windows and Linux builds. I have tested the desktop on Apple Silicon macOS and scoped command isolation is implemented for macOS.
+The bundling script writes `dist/OpenDex.app`, applies a local ad-hoc signature, and creates `dist/OpenDex-build.json`. That manifest records the app version, source commit, build profile, host architecture, timestamp, toolchain, ad-hoc signing state, bundle identifier, CDHash, and executable SHA-256. I use it to match a bundle back to the source I tested. Finder can launch the preview on the Mac that built it. Developer ID signing and notarization are release tasks. The Rust and Tauri code leave room for Windows and Linux builds. I have tested the desktop on Apple Silicon macOS and scoped command isolation is implemented for macOS.
 
 ```sh
 bash scripts/check.sh
@@ -140,6 +140,7 @@ I tested the new Claude Code transport against the installed executable without 
 - `src/mcp.rs` contains the JSON-RPC connection and tool operations.
 - `src/web.rs` sends search and page requests to the configured service and normalizes the sources.
 - `src/images.rs` handles image requests, raster input detection, and file export.
+- `scripts/build-manifest.py` writes the bundle build manifest.
 - `src/codex.rs` connects to the optional Codex app server.
 - `src/claude.rs` handles Claude Code account actions, streaming, and virtual MCP tools.
 - `src/desktop.rs` coordinates turns, approval prompts, and desktop commands.
