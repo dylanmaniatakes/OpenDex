@@ -22,23 +22,23 @@ test('returns all providers and models before a query', () => {
 
 test('matches provider names and models case-insensitively', () => {
   let result = filterComposerChoices(providers, {
-    selectedProviderId: 'claude',
-    selectedModelId: 'claude-user',
-    query: 'Ollama',
+    selectedProviderId: 'ollama',
+    selectedModelId: 'mistral-1',
+    query: 'mistral',
   });
   assert.deepEqual(result.providers, [providers[0]]);
   assert.equal(result.provider?.id, 'ollama');
-  assert.deepEqual(result.models, []);
-  assert.equal(result.selectedModel, '');
+  assert.deepEqual(result.models, ['mistral-1']);
+  assert.equal(result.selectedModel, 'mistral-1');
 
   result = filterComposerChoices(providers, {
     selectedProviderId: 'ollama',
-    selectedModelId: 'llama-1',
+    selectedModelId: 'mistral-1',
     query: 'mistral',
   });
   assert.deepEqual(result.providers, [providers[0]]);
   assert.deepEqual(result.models, ['mistral-1']);
-  assert.equal(result.selectedModel, 'llama-1');
+  assert.equal(result.selectedModel, 'mistral-1');
 });
 
 test('reports no matching provider or model without selecting one', () => {
