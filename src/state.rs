@@ -546,6 +546,17 @@ impl Data {
     }
 }
 
+pub(crate) fn open_lock_file(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 /// A small JSON store written through a same-directory temp file. Mutations become
 /// visible to readers only after the replacement has succeeded.
 pub struct Store {
@@ -557,12 +568,7 @@ pub struct Store {
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
         fs::create_dir_all(directory)?;
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(directory.join("workspace.lock"))?;
+        let lock = open_lock_file(&directory.join("workspace.lock"))?;
         lock.try_lock()
             .context("This OpenDex data folder is already in use.")?;
         let path = directory.join("workspace.json");

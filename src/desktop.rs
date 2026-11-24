@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    fs,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -1228,7 +1229,33 @@ fn resolve_approval(app: AppState<'_>, id: Uuid, allow: bool) -> Reply<()> {
     Ok(())
 }
 
+// The app lock is independent of --data-dir. Keep its file handle open
+// through application shutdown so the OS releases it on either quit or crash.
+fn acquire_instance(identifier: &str) -> Result<Option<fs::File>> {
+    let base =
+        directories::BaseDirs::new().context("Could not find the local app data directory.")?;
+    let directory = base.data_local_dir().join(identifier);
+    fs::create_dir_all(&directory)?;
+    let lock = crate::state::open_lock_file(&directory.join("application.lock"))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => {
+            Err(error).context("Could not lock the OpenDex application.")
+        }
+    }
+}
+
 pub fn run() {
+    let context = tauri::generate_context!();
+    let _instance = match acquire_instance(&context.config().identifier) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("OpenDex could not start: {error:#}");
+            return;
+        }
+    };
     let directory = std::env::args_os().skip(1).collect::<Vec<_>>();
     let override_home = directory
         .windows(2)
@@ -1280,6 +1307,6 @@ pub fn run() {
             stop_turn,
             resolve_approval
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("could not start OpenDex");
 }

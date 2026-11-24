@@ -49,7 +49,7 @@ I currently support initialized MCP sessions and the July 2026 protocol revision
 
 I default to dark mode. Under **Appearance**, I can change the theme, accent, typeface, text scale, spacing, widths, corner radius, and animation preference.
 
-The app saves project links, settings, conversations, and attachments in a local workspace file. On macOS, it lives under `~/Library/Application Support/org.opendex.desktop`. OpenDex uses the operating system credential store for API and MCP keys. I can move the data folder with `--data-dir` or `OPENDEX_DATA_DIR`. Messages, attachments, and approved tool output go to the currently selected model endpoint.
+The app saves project links, settings, conversations, and attachments in a local workspace file. On macOS, it lives under `~/Library/Application Support/org.opendex.desktop`. OpenDex uses the operating system credential store for API and MCP keys. I can move the data folder with `--data-dir` or `OPENDEX_DATA_DIR`. OpenDex allows one running copy per desktop user, including when I choose a different data folder. Messages, attachments, and approved tool output go to the currently selected model endpoint.
 
 ## Build from source
 
@@ -86,5 +86,11 @@ I use loopback fixtures to test each wire format and MCP transport without accou
 ## Preview scope
 
 This is my first local preview. My priorities are provider freedom, usable MCP settings, project-based agent work, and transparent permissions. I still have work to do on voice, generated media, web and computer-use tools, automations, shared/cloud history, MCP subscriptions and media-rich prompts, and platform packaging. I plan to share the source after I’ve verified the workflows I use most often.
+
+### Planned encrypted backup and restore
+
+I want to be able to save a password-protected backup of my complete settings for a reinstall or a move to another computer. That includes provider connections and model lists, MCP settings, permission profiles, appearance, instructions, and project links. I plan to include OpenDex-managed API keys and MCP credentials in the encrypted archive, along with provider account connection details.
+
+On restore, I want OpenDex to authenticate and decrypt the file before applying any changes, let me remap project paths, and put restored secrets back in the operating system credential store. For provider-managed account logins, I plan to use supported migration methods where available and guide users through sign-in again when a session cannot be transferred.
 
 I’m making OpenDex available under the [MIT License](LICENSE).
