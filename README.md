@@ -108,7 +108,7 @@ bash scripts/bundle-macos.sh
 The bundling script writes `dist/OpenDex.app`, applies a local ad-hoc signature, and creates `dist/OpenDex-build.json`. That manifest records the app version, source commit, build profile, host architecture, timestamp, toolchain, ad-hoc signing state, bundle identifier, CDHash, and executable SHA-256. I use it to match a bundle back to the source I tested. `scripts/verify-release.py` compares the built app with that manifest and current configuration. Finder can launch the preview on the Mac that built it. Developer ID signing and notarization are release tasks. The Rust and Tauri code leave room for Windows and Linux builds. I have tested the desktop on Apple Silicon macOS and scoped command isolation is implemented for macOS.
 
 ```sh
-bash scripts/check.sh
+bash scripts/release.sh
 
 # Optional installed-CLI checks. The Codex keyring check also uses disposable
 # native-Keychain credentials and deletes them afterward.
