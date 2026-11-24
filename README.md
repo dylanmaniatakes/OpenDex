@@ -7,7 +7,7 @@ I built OpenDex to use the models I choose for everyday chat and coding. It runs
 1. Open `dist/OpenDex.app` if you have the local preview bundle. To build it yourself, follow the instructions below.
 2. In **Model Chat**, choose **Find local models** if you already run Ollama. Pick an installed model to add it to the composer.
 3. To connect another service, open **Settings → Providers → Add provider**. Choose an adapter, enter the base URL and key if the endpoint requires one, and save.
-4. Use **Discover models** to browse an endpoint’s inventory, or paste model IDs one per line and choose **Add models**. Duplicate IDs are removed. Each model I add appears in both modes. Ollama Cloud has its own searchable catalog and uses an Ollama API key.
+4. Use **Discover models** to browse an endpoint’s inventory, or paste model IDs one per line and choose **Add models**. Duplicate IDs are removed. Each model I add appears in both modes. For Ollama Cloud I use the Ollama API key and can submit a query to the public model database, then add only the model IDs I want. I can also enter IDs manually.
 5. Use the sidebar dropdown to switch between **Model Chat** and **Code Agent**. Model Chat shows its conversations. In Code Agent, use **Add project** to choose a folder, then use the plus button beside a project to create another thread in it.
 
 I can search saved conversation titles, message text, and project names from the sidebar. Search stays on my computer and filters the selected mode. In Code Agent, matching project groups expand while I search. Escape clears the query.
@@ -30,7 +30,7 @@ In **Model Chat**, I can edit a user message or retry a reply. Both actions crea
 | Ollama Cloud | `https://ollama.com/api` | Ollama API key. |
 | OpenAI-compatible | A service’s Chat Completions base URL | Optional bearer key and headers populated from environment variables. |
 
-I can point an API adapter at a compatible gateway by editing its base URL. For example, LM Studio and many self-hosted inference servers expose Chat Completions. An endpoint with its own wire format needs a compatible gateway or a new adapter. Model discovery is optional, so I can still enter IDs when an endpoint provides inference only. Under **Advanced connection settings**, I can set the header that receives my saved API key. This lets me connect to gateways that expect a header such as `api-key`.
+For an Ollama Cloud connection, **Search Ollama** queries the public model database and shows only its result IDs. I click the ID to pin it, then use manual entry when Ollama search misses a private or custom model. The Cloud tag fetch remains available when I prefer to inspect that provider list. For example, LM Studio and many self-hosted inference servers expose Chat Completions. An endpoint with its own wire format needs a compatible gateway or a new adapter. Model discovery is optional, so I can still enter IDs when an endpoint provides inference only. Under **Advanced connection settings**, I can set the header that receives my saved API key. This lets me connect to gateways that expect a header such as `api-key`.
 
 For Gemini, I can discover models that support content generation, add model IDs manually, and use them in either mode. Text replies, image and PDF inputs, and Code Agent tool calls use Gemini’s own API. OpenDex keeps signed tool-call parts in memory while a turn is running. [Gemini API reference](https://aistudio.google.com/api-reference/generate-content)
 

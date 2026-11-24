@@ -230,6 +230,22 @@ async fn discover_models(app: AppState<'_>, id: Uuid) -> Reply<Vec<String>> {
 }
 
 #[tauri::command]
+async fn search_ollama_models(app: AppState<'_>, id: Uuid, query: String) -> Reply<Vec<String>> {
+    reply(
+        async {
+            let data = app.store.snapshot();
+            let provider = provider(&data, id)?;
+            ensure!(
+                provider.kind == ProviderKind::OllamaCloud,
+                "Choose an Ollama Cloud connection to search its catalog."
+            );
+            providers::search_ollama(&app.client, &query).await
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
 fn save_server(
     app: AppState<'_>,
     mut value: Server,
@@ -1850,6 +1866,7 @@ pub fn run() {
             save_server,
             remove_server,
             test_server,
+            search_ollama_models,
             mcp_context_catalog,
             mcp_read_resource,
             mcp_get_prompt,

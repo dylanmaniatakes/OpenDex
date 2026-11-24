@@ -1096,3 +1096,19 @@ async fn current_mcp_http_servers_send_environment_backed_headers() {
     session.close().await;
     fixture.finish();
 }
+
+#[test]
+fn ollama_search_parses_only_library_result_cards() {
+    let html = r#"
+<a href="/search">Models</a>
+<a href="/library/gemma">First</a>
+<a href="/library/dolphin-phi">Second</a>
+<a href="/library/gemma">Duplicate</a>
+<a href="/library/bad model/rejected">Injected</a>
+<a href="/library/%2Fescape">Escaped</a>
+"#;
+    assert_eq!(
+        providers::parse_ollama_search(html),
+        ["dolphin-phi", "gemma"]
+    );
+}

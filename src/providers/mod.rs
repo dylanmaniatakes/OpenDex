@@ -323,6 +323,62 @@ pub(crate) async fn checked(response: Response) -> Result<Response> {
     bail!("Endpoint returned HTTP {status}: {message}");
 }
 
+/// Parse the official Ollama search page's server-rendered library links.
+/// Keep this conservative: only `library/{model}` result cards are accepted.
+pub fn parse_ollama_search(html: &str) -> Vec<String> {
+    const PREFIX: &str = "href=\"/library/";
+    let mut models = Vec::new();
+    let mut cursor = 0;
+    while cursor < html.len() {
+        let Some(start) = html[cursor..].find(PREFIX) else {
+            break;
+        };
+        let start = cursor + start + PREFIX.len();
+        let Some(length) = html[start..].find('"') else {
+            break;
+        };
+        let id = &html[start..start + length];
+        if validate_model_id(id) {
+            models.push(id.to_owned());
+        }
+        cursor = start + length;
+    }
+    models.sort_unstable();
+    models.dedup();
+    models
+}
+
+fn validate_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 300
+        && id.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-' || byte == b'_'
+        })
+}
+
+pub async fn search_ollama(client: &Client, query: &str) -> Result<Vec<String>> {
+    let query = query.trim();
+    ensure!(!query.is_empty(), "Enter a search term for Ollama.");
+    ensure!(
+        query.len() <= 200,
+        "Keep the Ollama search term under 200 characters."
+    );
+    let mut url = reqwest::Url::parse("https://ollama.com/search")
+        .context("Ollama search URL is unavailable.")?;
+    url.query_pairs_mut().append_pair("q", query);
+    let response = checked(client.get(url).send().await?).await?;
+    let body = response
+        .text()
+        .await
+        .context("Ollama search returned unreadable content.")?;
+    let models = parse_ollama_search(&body);
+    ensure!(
+        !models.is_empty(),
+        "Ollama returned no matching models. Try a shorter or different search term."
+    );
+    Ok(models)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

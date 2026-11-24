@@ -317,7 +317,7 @@ export function settingsPanel(api) {
     const isCloud = provider.kind === 'ollama_cloud';
     const status = el('div', { class: 'form-status', role: 'status' });
     const available = discovery.get(provider.id);
-    const search = input(catalogSearch, { type: 'search', placeholder: isCloud ? 'Search Ollama Cloud models' : 'Filter discovered models', 'aria-label': 'Filter model catalog' });
+    const search = input(catalogSearch, { type: 'search', placeholder: 'Filter these models', 'aria-label': 'Filter model catalog' });
     const results = el('div', { class: 'catalog' });
     function fillResults() {
       const text = search.value.trim().toLowerCase();
@@ -335,7 +335,7 @@ export function settingsPanel(api) {
     }
     search.addEventListener('input', () => { catalogSearch = search.value; fillResults(); });
     fillResults();
-    const refresh = button(isCloud ? 'Fetch Cloud catalog' : 'Discover models', async () => {
+    const refresh = button(isCloud ? 'Fetch Cloud tags' : 'Discover models', async () => {
       await run(refresh, status, async () => {
         const values = await api.invoke('discover_models', { id: provider.id });
         discovery.set(provider.id, values);
@@ -356,8 +356,25 @@ export function settingsPanel(api) {
           await api.refresh(); render();
         } catch (error) { api.toast(String(error), true); }
       }, { glyph: 'close', onlyIcon: true, style: 'icon-button small' }))));
+    const catalog = el('div', { class: 'inline-form' }, available && search, refresh, status);
+    if (isCloud) {
+      const remote = input('', { type: 'search', required: true, placeholder: 'Search the public Ollama model database', 'aria-label': 'Search public Ollama models' });
+      const searchButton = el('button', { type: 'submit', class: 'button' }, icon('search', 16), 'Search Ollama');
+      const remoteForm = el('form', { class: 'inline-form', onsubmit: async (event) => {
+        event.preventDefault();
+        await run(searchButton, status, async () => {
+          const values = await api.invoke('search_ollama_models', { id: provider.id, query: remote.value });
+          discovery.set(provider.id, values);
+          catalogSearch = '';
+          render();
+          api.toast(`Found ${values.length} model${values.length === 1 ? '' : 's'}.`);
+        });
+      } }, remote, searchButton);
+      return formSection('Model picker', 'Only added models appear in Model Chat and Code Agent.',
+        remoteForm, manualForm, pinned, catalog, results);
+    }
     return formSection('Model picker', 'Only added models appear in Model Chat and Code Agent.',
-      manualForm, pinned, el('div', { class: 'inline-form' }, available && search, refresh, status), results);
+      manualForm, pinned, catalog, results);
   }
 
   function mcp() {
