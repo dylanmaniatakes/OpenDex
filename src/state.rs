@@ -464,6 +464,18 @@ impl Message {
         !self.text.is_empty() || self.attachment.is_some() || !self.resources.is_empty()
     }
 
+    pub fn validate_user_content(&self) -> Result<()> {
+        ensure!(
+            !self.text.trim().is_empty() || self.attachment.is_some() || !self.resources.is_empty(),
+            "Write a message or attach a file or resource."
+        );
+        ensure!(
+            self.text.len() <= 256_000,
+            "This message exceeds the size limit."
+        );
+        Ok(())
+    }
+
     pub fn content(&self) -> String {
         use std::fmt::Write as _;
         let mut content = match &self.attachment {
@@ -494,6 +506,14 @@ pub struct Project {
     pub root: PathBuf,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BranchAction {
+    Continue,
+    Retry,
+    Edit { text: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {
     pub id: Uuid,
@@ -511,6 +531,62 @@ pub struct Thread {
     pub model_id: Option<String>,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_thread: Option<Uuid>,
+}
+
+impl Thread {
+    pub fn branch_at(&self, message: Uuid, action: BranchAction) -> Result<Self> {
+        let position = self
+            .messages
+            .iter()
+            .position(|item| item.id == message)
+            .context("That message is no longer in the conversation.")?;
+        let selected = &self.messages[position];
+        ensure!(
+            selected.role != Role::Tool && selected.has_content(),
+            "Choose a chat message to branch from."
+        );
+        let mut end = position;
+        let label = match &action {
+            BranchAction::Continue => "Branch",
+            BranchAction::Retry => {
+                ensure!(self.mode == Mode::Chat, "Retry is available in Model Chat.");
+                end = self.messages[..=position]
+                    .iter()
+                    .rposition(|item| item.role == Role::User)
+                    .context("This response has no user message to retry.")?;
+                "Retry"
+            }
+            BranchAction::Edit { .. } => {
+                ensure!(
+                    self.mode == Mode::Chat && selected.role == Role::User,
+                    "Choose a user message in Model Chat to edit."
+                );
+                "Edited"
+            }
+        };
+        let mut messages = self.messages[..=end].to_vec();
+        if let BranchAction::Edit { text } = action {
+            let prompt = messages.last_mut().expect("selected message exists");
+            prompt.id = Uuid::new_v4();
+            prompt.text = text.trim().into();
+            prompt.validate_user_content()?;
+        }
+        let prefix: String = self.title.chars().take(130 - label.len() - 3).collect();
+        Ok(Self {
+            id: Uuid::new_v4(),
+            mode: self.mode,
+            title: format!("{prefix} · {label}"),
+            messages,
+            workspace: self.workspace.clone(),
+            project_id: self.project_id,
+            provider_id: self.provider_id,
+            model_id: self.model_id.clone(),
+            instructions: self.instructions.clone(),
+            parent_thread: Some(self.id),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

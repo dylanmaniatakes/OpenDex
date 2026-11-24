@@ -12,6 +12,8 @@ I built OpenDex to use the models I choose for everyday chat and coding. It runs
 
 I can rename or export each conversation, attach a file, and set instructions globally or per thread. Both modes stream replies, and the stop button interrupts the active turn. Images and PDFs require a model and endpoint that accept them.
 
+In **Model Chat**, I can edit a user message or retry a reply. Both actions create a branch using the history through the original prompt, with its saved attachments. I can also use **Branch from here** in either mode to continue through a selected message. I can return to the source under **Conversation settings → Open original conversation**. Code Agent branches use the selected project folder, and I can create a separate worktree for isolated changes.
+
 ## Connections
 
 | Adapter | Default base URL | Authentication |
@@ -74,7 +76,7 @@ cargo test --locked
 cargo test --locked --test provider_transports installed_codex_server -- --ignored
 ```
 
-I use loopback fixtures to test each wire format and MCP transport without account credentials. I verified Gemini model discovery, streaming chat, and a Code Agent file read through the desktop app against a native-protocol fixture. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, approved a file edit and an MCP call in a disposable project, and sent a rendered MCP prompt with a text resource to a local Ollama model.
+I use loopback fixtures to test each wire format and MCP transport without account credentials. I verified Gemini model discovery, streaming chat, and a Code Agent file read through the desktop app against a native-protocol fixture. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, including edited and retried branches, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, approved a file edit and an MCP call in a disposable project, and sent a rendered MCP prompt with a text resource to a local Ollama model.
 
 ### Source layout
 

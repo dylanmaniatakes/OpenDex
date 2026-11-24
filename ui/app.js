@@ -131,14 +131,17 @@ function queueNavigation(operation) {
   return navQueue;
 }
 
-async function makeThread(nextMode = mode, project = nextMode === 'agent' ? current()?.project_id : null) {
-  const thread = await invoke('new_thread', { mode: nextMode, project: project ?? null });
-  if (project) collapsedProjects.delete(project);
+function activateThread(thread) {
+  if (thread.project_id) collapsedProjects.delete(thread.project_id);
   active = thread.id;
   mode = thread.mode;
   lastThreadByMode.set(mode, thread.id);
   updateThread(thread);
   $('prompt').focus();
+}
+
+async function makeThread(nextMode = mode, project = nextMode === 'agent' ? current()?.project_id : null) {
+  activateThread(await invoke('new_thread', { mode: nextMode, project: project ?? null }));
 }
 
 async function openThread(id) {
@@ -343,6 +346,11 @@ function threadMenu(thread) {
       const path = await io.save({ title: 'Export conversation', defaultPath: 'conversation.md', filters: [{ name: 'Markdown', extensions: ['md'] }] });
       if (path) { await invoke('export_thread', { id, path }); toast('Conversation exported.'); }
     }), { glyph: 'note' }),
+    data.threads.some((item) => item.id === thread.parent_thread) &&
+      button('Open original conversation', () => {
+        $('details').close();
+        queueNavigation(() => openThread(thread.parent_thread));
+      }, { glyph: 'branch' }),
     thread.workspace && button('Clear project', transient(async () => {
       updateThread(await invoke('edit_thread', { id, changes: { clear_workspace: true } }));
       $('details').close();
@@ -453,7 +461,52 @@ function welcome(thread) {
   );
 }
 
-function messageCard(message) {
+async function branchConversation(thread, message, action) {
+  const branch = await invoke('branch_thread', { id: thread.id, message: message.id, action });
+  if (action.kind === 'edit') $('details').close();
+  activateThread(branch);
+  if (action.kind !== 'continue') replyToBranch(branch).catch((error) => toast(String(error), true));
+}
+
+function editMessage(thread, message) {
+  const text = el('textarea', { rows: 6, maxlength: 256000,
+    required: !message.attachment && !message.resources?.length }, message.text);
+  const submit = el('button', { type: 'submit', class: 'button primary' }, 'Send edited message');
+  const status = el('p', { class: 'status-error', role: 'status' });
+  const form = el('form', { class: 'details-form', onsubmit: async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    status.textContent = '';
+    try {
+      await branchConversation(thread, message, { kind: 'edit', text: text.value });
+    } catch (error) {
+      status.textContent = String(error);
+    } finally {
+      submit.disabled = false;
+    }
+  } }, field('Message', text),
+  el('p', { class: 'muted' }, 'The edited message and its attachments will be sent in a new branch.'),
+  status,
+  el('div', { class: 'form-actions right' }, button('Cancel', () => $('details').close()), submit));
+  showDetails('Edit message', form);
+  text.focus();
+}
+
+function messageActions(thread, message, lastVisible) {
+  const user = message.role === 'user';
+  const canReply = user && thread.parent_thread && thread.messages.at(-1)?.id === message.id;
+  const action = (label, glyph, handler) => button(label, handler, { glyph, onlyIcon: true, style: 'icon-button small' });
+  return el('div', { class: 'message-actions' },
+    user && thread.mode === 'chat' && action('Edit message', 'edit', () => editMessage(thread, message)),
+    !user && action('Copy response', 'copy', () => copy(message.text)),
+    thread.mode === 'chat' && (!user || lastVisible) && (canReply
+      ? action('Generate reply', 'refresh', transient(() => replyToBranch(thread)))
+      : action('Retry reply', 'refresh', () => queueNavigation(() => branchConversation(thread, message, { kind: 'retry' })))),
+    action('Branch from here', 'branch', () => queueNavigation(() => branchConversation(thread, message, { kind: 'continue' }))),
+  );
+}
+
+function messageCard(thread, message, lastVisible) {
   const user = message.role === 'user';
   if (message.role === 'tool') {
     return el('details', { class: 'tool-result' }, el('summary', {}, icon('terminal', 15), message.tool_label ?? message.tool_name ?? 'Tool result'),
@@ -464,8 +517,7 @@ function messageCard(message) {
   const meta = user ? null : el('div', { class: 'assistant-meta' },
     el('span', { class: 'brand-symbol tiny', 'aria-hidden': 'true' }),
     el('span', {}, message.model ?? 'Assistant'),
-    message.incomplete && el('span', { class: 'muted' }, '· Partial response'),
-    button('Copy response', () => copy(message.text), { glyph: 'copy', onlyIcon: true, style: 'icon-button small' }));
+    message.incomplete && el('span', { class: 'muted' }, '· Partial response'));
   return el('article', { class: 'message ' + (user ? 'user' : 'assistant') }, meta,
     el('div', { class: 'message-content' }, body,
       message.attachment && el('div', { class: 'chip file-chip' }, icon('note', 15), message.attachment.name),
@@ -475,7 +527,8 @@ function messageCard(message) {
       }),
       message.resources?.map((resource) => el('details', { class: 'tool-result message-resource' },
         el('summary', {}, icon('plug', 15), resource.name, el('small', {}, ' · ' + resource.source)),
-        el('pre', {}, resource.text)))));
+        el('pre', {}, resource.text)))),
+    messageActions(thread, message, lastVisible));
 }
 
 function nearBottom() {
@@ -491,7 +544,10 @@ function timeline(thread, forced = false) {
   const shouldScroll = forced || nearBottom() || lastRender !== thread?.id;
   lastRender = thread?.id;
   const turn = live();
-  const items = (thread?.messages ?? []).map(messageCard).filter(Boolean);
+  const messages = thread?.messages ?? [];
+  const lastVisible = messages.findLast((message) => message.role !== 'tool' &&
+    (message.text || message.attachment || message.resources?.length));
+  const items = messages.map((message) => messageCard(thread, message, lastVisible === message)).filter(Boolean);
   if (turn?.stream) {
     items.push(el('article', { class: 'message assistant' },
       el('div', { class: 'assistant-meta' }, el('span', { class: 'brand-symbol tiny' }), thread.model_id ?? 'Assistant'),
@@ -611,39 +667,29 @@ function render() {
   composer(thread);
 }
 
-async function send(event) {
-  event?.preventDefault();
-  const thread = current();
-  if (!thread) return;
-  if (live()) { await invoke('stop_turn', { id: thread.id }); return; }
-  const draft = draftOf();
-  if (!draft.text.trim() && !draft.attachment && !draft.resources.length) return;
+function hasSelectedModel(thread) {
   const provider = data.providers.find((item) => item.id === thread.provider_id);
-  if (!provider?.models.includes(thread.model_id)) {
-    toast('Choose a provider and model before sending.', true);
+  if (provider?.models.includes(thread.model_id)) return true;
+  toast('Choose a provider and model before sending.', true);
+  if (thread.id === active) {
     if (!provider?.models.length) settings.open('providers', provider?.id);
     else $('model-select').focus();
-    return;
   }
-  const submitted = { text: draft.text, attachment: draft.attachment, resources: draft.resources };
+  return false;
+}
+
+async function generateReply(thread, command, args, restoreDraft) {
+  if (turns.has(thread.id)) return;
+  const draft = draftOf(thread.id);
   draft.error = null;
   draft.notice = null;
-  draft.text = '';
-  draft.attachment = null;
-  draft.resources = [];
-  $('prompt').value = '';
   turns.set(thread.id, { stream: '', notice: '', approval: null, accepted: false });
   render();
   try {
-    await invoke('send_message', { prompt: { thread: thread.id, text: submitted.text, attachment: submitted.attachment?.path ?? null, resources: submitted.resources } });
+    await invoke(command, args);
   } catch (error) {
     draft.error = String(error);
-    if (!turns.get(thread.id)?.accepted) {
-      draft.text = submitted.text;
-      draft.attachment = submitted.attachment;
-      draft.resources = submitted.resources;
-      if (thread.id === active) $('prompt').value = draft.text;
-    }
+    if (!turns.get(thread.id)?.accepted) restoreDraft?.();
     toast(draft.error, true);
   } finally {
     turns.delete(thread.id);
@@ -651,6 +697,34 @@ async function send(event) {
     await refresh();
     if (thread.id === active) { $('prompt').focus(); scrollDown(true); }
   }
+}
+
+async function replyToBranch(thread) {
+  if (turns.has(thread.id) || !hasSelectedModel(thread)) return;
+  const prompt = thread.messages.at(-1);
+  if (prompt?.role !== 'user') return;
+  await generateReply(thread, 'reply_in_branch', { id: thread.id, message: prompt.id });
+}
+
+async function send(event) {
+  event?.preventDefault();
+  const thread = current();
+  if (!thread) return;
+  if (live()) { await invoke('stop_turn', { id: thread.id }); return; }
+  const draft = draftOf();
+  if (!draft.text.trim() && !draft.attachment && !draft.resources.length) return;
+  if (!hasSelectedModel(thread)) return;
+  const submitted = { text: draft.text, attachment: draft.attachment, resources: draft.resources };
+  draft.text = '';
+  draft.attachment = null;
+  draft.resources = [];
+  $('prompt').value = '';
+  await generateReply(thread, 'send_message', {
+    prompt: { thread: thread.id, text: submitted.text, attachment: submitted.attachment?.path ?? null, resources: submitted.resources },
+  }, () => {
+    Object.assign(draft, submitted);
+    if (thread.id === active) $('prompt').value = draft.text;
+  });
 }
 
 function onTurn({ thread: id, kind, details }) {

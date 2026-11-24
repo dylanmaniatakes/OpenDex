@@ -10,6 +10,7 @@ const paths = {
   stop: '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
   branch: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 8v8m12-7a6 6 0 0 1-6 6H6"/>',
+  edit: '<path d="m14 5 5 5M5 19l4-1 10-10a2 2 0 0 0-3-3L6 15Z"/>',
   diff: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 10h4m-2-2v4m4 3h4"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',

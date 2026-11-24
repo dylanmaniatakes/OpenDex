@@ -175,8 +175,9 @@ small { color: var(--muted); }
 .user .message-content { background: var(--panel-raised); border: 1px solid var(--line); border-radius: var(--radius) var(--radius) min(5px, var(--radius)) var(--radius); padding: 12px var(--space); }
 .user-text, .stream-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .94rem; line-height: 1.6; }
 .assistant-meta { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: .72rem; font-weight: 600; margin: 0 0 6px; }
-.assistant-meta .icon-button { opacity: .6; }
-.assistant-meta .icon-button:hover { opacity: 1; }
+.message-actions { display: flex; gap: 3px; align-items: center; margin: 3px 0 0; opacity: .68; }
+.user .message-actions { justify-content: flex-end; }
+.message:hover .message-actions, .message-actions:focus-within { opacity: 1; }
 .markdown { font-size: .94rem; line-height: 1.62; overflow-wrap: anywhere; }
 .markdown p { white-space: pre-line; }
 .markdown > * + * { margin-top: .75em; }

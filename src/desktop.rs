@@ -6,9 +6,9 @@ use crate::{
     mcp::{self, Connection},
     providers::{self, Tool},
     state::{
-        Appearance, Data, MAX_RESOURCE_BYTES, MAX_RESOURCES_PER_MESSAGE, McpResource, Message,
-        Mode, Permissions, Project, Provider, ProviderKind, Role, Rule, Server, Store, Thread,
-        ToolCall, Transport, delete_secret, write_secret,
+        Appearance, BranchAction, Data, MAX_RESOURCE_BYTES, MAX_RESOURCES_PER_MESSAGE, McpResource,
+        Message, Mode, Permissions, Project, Provider, ProviderKind, Role, Rule, Server, Store,
+        Thread, ToolCall, Transport, delete_secret, write_secret,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -429,6 +429,7 @@ fn insert_thread(data: &mut Data, mode: Mode, project: Option<Project>) -> Threa
         provider_id: provider.map(|provider| provider.id),
         model_id,
         instructions: String::new(),
+        parent_thread: None,
     };
     data.active_thread = Some(thread.id);
     data.threads.push(thread.clone());
@@ -547,6 +548,21 @@ fn edit_thread(app: AppState<'_>, id: Uuid, changes: ThreadChanges) -> Reply<Thr
             Ok(thread.clone())
         })
     })())
+}
+
+#[tauri::command]
+fn branch_thread(
+    app: AppState<'_>,
+    id: Uuid,
+    message: Uuid,
+    action: BranchAction,
+) -> Reply<Thread> {
+    reply(app.store.change(|data| {
+        let branch = fetch_thread(data, id)?.branch_at(message, action)?;
+        data.active_thread = Some(branch.id);
+        data.threads.push(branch.clone());
+        Ok(branch)
+    }))
 }
 
 #[tauri::command]
@@ -1096,21 +1112,40 @@ fn validate_resources(data: &Data, resources: &[McpResource]) -> Result<()> {
     Ok(())
 }
 
+enum TurnInput {
+    New(Prompt),
+    Existing(Uuid),
+}
+
 #[tauri::command]
 async fn send_message(app: AppState<'_>, window: AppHandle, prompt: Prompt) -> Reply<()> {
-    let outcome = async {
-        let text = prompt.text.trim();
+    reply(run_user_turn(&app, window, prompt.thread, TurnInput::New(prompt)).await)
+}
+
+#[tauri::command]
+async fn reply_in_branch(
+    app: AppState<'_>,
+    window: AppHandle,
+    id: Uuid,
+    message: Uuid,
+) -> Reply<()> {
+    reply(run_user_turn(&app, window, id, TurnInput::Existing(message)).await)
+}
+
+async fn run_user_turn(
+    app: &Arc<Desktop>,
+    window: AppHandle,
+    id: Uuid,
+    input: TurnInput,
+) -> Result<()> {
+    let (data, provider, model, root, cancel, _guard) = {
+        let mut runs = app.runs.lock().expect("runs lock");
         ensure!(
-            !text.is_empty() || prompt.attachment.is_some() || !prompt.resources.is_empty(),
-            "Write a message or attach a file or resource."
-        );
-        ensure!(
-            text.len() <= 256_000,
-            "This message exceeds the size limit."
+            !runs.contains_key(&id),
+            "This conversation already has a turn in progress."
         );
         let data = app.store.snapshot();
-        validate_resources(&data, &prompt.resources)?;
-        let thread = fetch_thread(&data, prompt.thread)?;
+        let thread = fetch_thread(&data, id)?;
         let provider = provider(&data, thread.provider_id.context("Choose a provider.")?)?.clone();
         let model = thread
             .model_id
@@ -1122,53 +1157,69 @@ async fn send_message(app: AppState<'_>, window: AppHandle, prompt: Prompt) -> R
             .as_deref()
             .map(agent::checked_root)
             .transpose()?;
-        let cancel = CancellationToken::new();
-
-        let _guard = {
-            let mut runs = app.runs.lock().expect("runs lock");
+        if let Some(root) = &root {
             let mut workspaces = app.workspaces.lock().expect("workspaces lock");
             ensure!(
-                !runs.contains_key(&thread.id),
-                "This conversation already has a turn in progress."
-            );
-            if let Some(root) = &root {
-                ensure!(
-                    workspaces.insert(root.clone()),
-                    "Another agent is using this project folder."
-                );
-            }
-            runs.insert(thread.id, cancel.clone());
-            RunGuard {
-                state: Arc::clone(&app),
-                thread: thread.id,
-                root: root.clone(),
-            }
-        };
-
-        let attachment = prompt
-            .attachment
-            .as_deref()
-            .map(agent::attachment)
-            .transpose()?;
-        if attachment
-            .as_ref()
-            .is_some_and(|file| file.media_type.as_deref() == Some("application/pdf"))
-        {
-            ensure!(
-                !matches!(
-                    provider.kind,
-                    ProviderKind::Ollama | ProviderKind::OllamaCloud | ProviderKind::ChatGptAccount
-                ),
-                "Choose a PDF-capable API provider for this attachment."
+                workspaces.insert(root.clone()),
+                "Another agent is using this project folder."
             );
         }
-        let mut message = Message::new(Role::User, text);
-        message.attachment = attachment;
-        message.resources = prompt.resources;
-        let thread = app.store.change(|data| {
-            let thread = thread_mut(data, prompt.thread)?;
+        let cancel = CancellationToken::new();
+        runs.insert(id, cancel.clone());
+        let guard = RunGuard {
+            state: Arc::clone(app),
+            thread: id,
+            root: root.clone(),
+        };
+        (data, provider, model, root, cancel, guard)
+    };
+    let thread = fetch_thread(&data, id)?;
+    let new_message = matches!(&input, TurnInput::New(_));
+    let message = match input {
+        TurnInput::New(prompt) => {
+            validate_resources(&data, &prompt.resources)?;
+            let mut message = Message::new(Role::User, prompt.text.trim());
+            message.attachment = prompt
+                .attachment
+                .as_deref()
+                .map(agent::attachment)
+                .transpose()?;
+            message.resources = prompt.resources;
+            message
+        }
+        TurnInput::Existing(message) => {
+            ensure!(
+                thread.mode == Mode::Chat && thread.parent_thread.is_some(),
+                "Retry is available in a Model Chat branch."
+            );
+            thread
+                .messages
+                .last()
+                .filter(|last| last.id == message && last.role == Role::User)
+                .cloned()
+                .context("This branch has already moved on from that message.")?
+        }
+    };
+    message.validate_user_content()?;
+    if message
+        .attachment
+        .as_ref()
+        .is_some_and(|file| file.media_type.as_deref() == Some("application/pdf"))
+    {
+        ensure!(
+            !matches!(
+                provider.kind,
+                ProviderKind::Ollama | ProviderKind::OllamaCloud | ProviderKind::ChatGptAccount
+            ),
+            "Choose a PDF-capable API provider for this attachment."
+        );
+    }
+    let thread = if new_message {
+        app.store.change(|data| {
+            let thread = thread_mut(data, id)?;
             if thread.messages.is_empty() && thread.title == "New conversation" {
-                let title = text
+                let title = message
+                    .text
                     .lines()
                     .find(|line| !line.trim().is_empty())
                     .or_else(|| message.attachment.as_ref().map(|file| file.name.as_str()))
@@ -1187,30 +1238,31 @@ async fn send_message(app: AppState<'_>, window: AppHandle, prompt: Prompt) -> R
             }
             thread.messages.push(message.clone());
             Ok(thread.clone())
-        })?;
-        let turn = Turn {
-            app: Arc::clone(&app),
-            window,
-            id: prompt.thread,
-            root,
-            rules: data.permissions.effective(),
-            partial: Arc::new(Mutex::new(String::new())),
-        };
-        turn.event("accepted", json!({"message":message,"title":thread.title}));
-        let provider_id = provider.id;
-        let result = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                turn.event("stopped", json!({}));
-                Ok(())
-            }
-            result = complete_turn(turn.clone(), data, thread, provider, model.clone()) => result,
-        };
-        turn.save_partial(model, provider_id)?;
-        result
-    }
-    .await;
-    reply(outcome)
+        })?
+    } else {
+        // The prompt is already stored in the branch, including attachments.
+        thread.clone()
+    };
+    let turn = Turn {
+        app: Arc::clone(app),
+        window,
+        id,
+        root,
+        rules: data.permissions.effective(),
+        partial: Arc::new(Mutex::new(String::new())),
+    };
+    turn.event("accepted", json!({"message":message,"title":thread.title}));
+    let provider_id = provider.id;
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            turn.event("stopped", json!({}));
+            Ok(())
+        }
+        result = complete_turn(turn.clone(), data, thread, provider, model.clone()) => result,
+    };
+    turn.save_partial(model, provider_id)?;
+    result
 }
 
 #[tauri::command]
@@ -1297,6 +1349,7 @@ pub fn run() {
             new_thread,
             open_project,
             edit_thread,
+            branch_thread,
             set_active,
             remove_thread,
             load_attachment,
@@ -1304,6 +1357,7 @@ pub fn run() {
             review_changes,
             add_worktree,
             send_message,
+            reply_in_branch,
             stop_turn,
             resolve_approval
         ])
