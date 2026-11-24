@@ -2,17 +2,76 @@ use opendex::{
     backup, images,
     state::{
         AnthropicAuth, McpScope, Message, Project, Provider, ProviderKind, Role, Rule, Store,
-        Thread,
+        Thread, read_secret, write_secret,
     },
     web::Config,
 };
 use serde_json::json;
-use std::{collections::HashMap, fs};
+use std::{
+    any::Any,
+    collections::HashMap,
+    fs,
+    sync::{Arc, Mutex},
+};
 use tempfile::tempdir;
 use uuid::Uuid;
 
+// Shared in-memory credentials exercise export and restore without touching
+// the developer's OS credential store. Each Entry resolves the same saved slot.
+#[derive(Default)]
+struct TestKeyring(Arc<Mutex<HashMap<String, Vec<u8>>>>);
+struct TestCredential {
+    entries: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    slot: String,
+}
+impl keyring::credential::CredentialBuilderApi for TestKeyring {
+    fn build(
+        &self,
+        target: Option<&str>,
+        service: &str,
+        user: &str,
+    ) -> keyring::Result<Box<keyring::credential::Credential>> {
+        Ok(Box::new(TestCredential {
+            entries: self.0.clone(),
+            slot: format!("{target:?}:{service}:{user}"),
+        }))
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+impl keyring::credential::CredentialApi for TestCredential {
+    fn set_secret(&self, value: &[u8]) -> keyring::Result<()> {
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(self.slot.clone(), value.to_vec());
+        Ok(())
+    }
+    fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(&self.slot)
+            .cloned()
+            .ok_or(keyring::Error::NoEntry)
+    }
+    fn delete_credential(&self) -> keyring::Result<()> {
+        self.entries
+            .lock()
+            .unwrap()
+            .remove(&self.slot)
+            .map(|_| ())
+            .ok_or(keyring::Error::NoEntry)
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[test]
 fn encrypted_settings_require_authentication_and_restore_without_replacing_chats() {
+    keyring::set_default_credential_builder(Box::new(TestKeyring::default()));
     let folder = tempdir().unwrap();
     let source = Store::open(&folder.path().join("source")).unwrap();
     let destination = Store::open(&folder.path().join("destination")).unwrap();
@@ -83,9 +142,36 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
             Ok(())
         })
         .unwrap();
+    let session = json!({"access_token":"fixture-access", "refresh_token":"fixture-refresh", "expires_at_ms":1}).to_string();
+    source
+        .change(|data| {
+            for (index, secret) in [(0, "fixture-api-key"), (2, session.as_str())] {
+                let provider = &mut data.providers[index];
+                write_secret(provider.credential_id(), &provider.endpoint, secret)?;
+                provider.has_secret = true;
+            }
+            let server = &mut data.servers[0];
+            write_secret(server.credential_id(), &server.address, "fixture-mcp-key")?;
+            server.has_secret = true;
+            Ok(())
+        })
+        .unwrap();
     backup::export(&source, &path, passphrase.into()).unwrap();
     let mut ciphertext = fs::read(&path).unwrap();
     assert!(ciphertext.starts_with(b"age-encryption.org/v1\n"));
+    for secret in [
+        "fixture-api-key",
+        "fixture-access",
+        "fixture-refresh",
+        "fixture-mcp-key",
+    ] {
+        assert!(
+            !ciphertext
+                .windows(secret.len())
+                .any(|bytes| bytes == secret.as_bytes())
+        );
+    }
+
     assert!(
         !ciphertext
             .windows(15)
@@ -122,6 +208,29 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     );
     assert_eq!(restored.active_thread, Some(thread_id));
     assert_eq!(restored.providers[0].models, ["pinned-model"]);
+    for (index, expected) in [(0, "fixture-api-key"), (2, session.as_str())] {
+        let provider = &restored.providers[index];
+        assert!(provider.has_secret);
+        assert!(provider.secret_ref.is_some());
+        assert_ne!(
+            provider.credential_id(),
+            source.snapshot().providers[index].credential_id()
+        );
+        assert_eq!(
+            read_secret(provider.credential_id(), &provider.endpoint, true)
+                .unwrap()
+                .as_deref(),
+            Some(expected)
+        );
+    }
+    let server = &restored.servers[0];
+    assert_eq!(
+        read_secret(server.credential_id(), &server.address, true)
+            .unwrap()
+            .as_deref(),
+        Some("fixture-mcp-key")
+    );
+
     assert_eq!(restored.providers[2].kind, ProviderKind::Anthropic);
     assert_eq!(restored.providers[2].anthropic_auth, AnthropicAuth::Account);
     assert_eq!(

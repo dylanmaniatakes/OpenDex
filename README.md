@@ -114,7 +114,7 @@ I use loopback fixtures to test each wire format and MCP transport without accou
 
 I verified conversation-level MCP selection with two loopback servers in the macOS app. I declined and approved individual tool calls under a globally permissive profile, checked that a denied tool stayed out of the model request, and ran a Code Agent conversation with an empty selection.
 
-I exported and restored an encrypted settings backup between two local data folders in the macOS app. I kept the destination conversation, remapped a project folder, and confirmed that the restored Keychain entries authenticated requests to a model fixture and an MCP fixture. Automated tests cover wrong passphrases, tampering, and changes to the file after preview.
+I exported and restored an encrypted settings backup between two local data folders in the macOS app. I kept the destination conversation, remapped a project folder, and confirmed that the restored Keychain entries authenticated requests to a model fixture and an MCP fixture. Automated tests cover wrong passphrases, tampering, and changes to the file after preview. The backup integration test uses an in-memory credential store to verify that API keys, MCP bearer keys, and Anthropic access and refresh tokens restore into new credential slots. It also checks that the encrypted file contains none of those test values in plaintext.
 
 I tested selecting several attachments in Model Chat, removing one, and verifying that the text and image reached a local model endpoint fixture. I edited that message after moving the source files and verified that the branch sent the saved copies. I also dragged a file from Finder into a Code Agent thread and confirmed that the endpoint received it.
 
