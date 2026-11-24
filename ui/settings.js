@@ -415,6 +415,20 @@ export function settingsPanel(api) {
     const details = el('div', { class: 'wide' });
     const status = el('div', { class: 'form-status', role: 'status' });
     const save = el('button', { type: 'submit', class: 'button primary' }, 'Save web search');
+    const test = button('Test search', async () => {
+      if (service === 'searxng' && !endpoint.reportValidity()) return;
+      const value = connection();
+      await run(test, status, async () => {
+        const count = await api.invoke('test_web_search', { value });
+        status.textContent = `Search service responded. ${count} ${count === 1 ? 'source' : 'sources'} returned.`;
+      });
+    }, { glyph: 'search', title: 'Send a test search for OpenDex' });
+
+    function connection() {
+      if (service === 'searxng') return { kind: service, endpoint: endpoint.value.trim() };
+      if (service === 'ollama') return { kind: service, provider: provider.value };
+      return null;
+    }
 
     function showService() {
       details.replaceChildren();
@@ -427,6 +441,8 @@ export function settingsPanel(api) {
         }, { glyph: 'plus' }));
       }
       save.disabled = service === 'ollama' && !cloud.length;
+      test.disabled = !service || save.disabled;
+      status.textContent = '';
     }
 
     const choice = options([['', 'Off'], ['searxng', 'SearXNG'], ['ollama', 'Ollama Cloud']], service, (value) => {
@@ -437,15 +453,12 @@ export function settingsPanel(api) {
     const form = el('form', { class: 'form-grid', onsubmit: (event) => {
       event.preventDefault();
       run(save, status, async () => {
-        let value = null;
-        if (service === 'searxng') value = { kind: service, endpoint: endpoint.value.trim() };
-        if (service === 'ollama') value = { kind: service, provider: provider.value };
-        await api.invoke('save_web_search', { value });
+        await api.invoke('save_web_search', { value: connection() });
         await api.refresh();
         status.textContent = 'Web search settings saved.';
       });
     } }, field('Search service', choice), details,
-    el('div', { class: 'form-actions wide' }, save, status));
+    el('div', { class: 'form-actions wide' }, save, test, status));
     return el('div', { class: 'settings-page' }, heading('Web search', 'Choose the service that receives search queries from your conversations.'),
       formSection('Connection', 'Turn on Web search in a conversation’s composer to make it available to the model.', form));
   }

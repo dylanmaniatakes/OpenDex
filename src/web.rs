@@ -163,7 +163,7 @@ impl Service {
                         json!({"query":query,"max_results":limit}),
                     )?,
                 };
-                let response = response(request).await?;
+                let response = response(request, matches!(self, Self::Searxng(_))).await?;
                 let results = response["results"]
                     .as_array()
                     .context("The search service did not return a results array.")?;
@@ -189,7 +189,7 @@ impl Service {
                     bail!("This search service does not support fetching pages.");
                 };
                 let request = ollama_request(client, provider, FETCH, json!({"url":url.as_str()}))?;
-                let response = response(request).await?;
+                let response = response(request, false).await?;
                 ensure!(
                     response["content"].is_string(),
                     "The web service did not return page text."
@@ -217,13 +217,18 @@ fn ollama_request(
     providers::request(provider, client.post(url).json(&payload))
 }
 
-async fn response(request: RequestBuilder) -> Result<Value> {
+async fn response(request: RequestBuilder, searxng: bool) -> Result<Value> {
     let mut response = request
         .timeout(Duration::from_secs(30))
         .send()
         .await
         .map_err(|error| error.without_url())
         .context("Could not reach the web service.")?;
+    if searxng && response.status() == reqwest::StatusCode::FORBIDDEN {
+        bail!(
+            "SearXNG returned HTTP 403. Check that JSON is enabled in search.formats and that the server allows access from this computer."
+        );
+    }
     ensure!(
         response.status().is_success(),
         "The web service returned HTTP {}.",

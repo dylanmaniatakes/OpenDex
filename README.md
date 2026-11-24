@@ -58,6 +58,8 @@ I currently support initialized MCP sessions and the July 2026 protocol revision
 
 In **Settings → Web search**, I can point OpenDex at a SearXNG search URL with JSON output enabled or choose a saved Ollama Cloud connection. Ollama Cloud also lets the model request a page’s main text. The search service is independent of the model endpoint, so I can use web tools with a local model that supports tool calling. [SearXNG search API](https://docs.searxng.org/dev/search_api.html), [Ollama web API](https://docs.ollama.com/capabilities/web-search)
 
+For my self-hosted SearXNG instance, I enter its search URL, such as `https://search.example.org/search`, including any path used by my reverse proxy. **Test search** sends the query “OpenDex” and reports whether the server returned results. If the server returns HTTP 403, I check that `json` is enabled in `search.formats` and that the server allows access from this computer. [SearXNG search settings](https://docs.searxng.org/admin/settings/settings_search.html#formats)
+
 I turn on **Web search** in the composer for each conversation where I want it. The approval prompt shows the query or page URL before OpenDex sends it. **Custom → Search and fetch web pages** controls when I’m asked. The conversation keeps the titles, URLs, and excerpts returned by the service, and I can open those sources in my browser.
 
 ## Appearance and data

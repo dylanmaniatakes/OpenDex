@@ -373,6 +373,27 @@ fn save_web_search(app: AppState<'_>, value: Option<web::Config>) -> Reply<()> {
 }
 
 #[tauri::command]
+async fn test_web_search(app: AppState<'_>, value: web::Config) -> Reply<usize> {
+    reply(
+        async {
+            let config = app.store.snapshot();
+            let service = value.resolve(&config.providers)?;
+            let result = service
+                .execute(
+                    &app.client,
+                    web::Action::Search {
+                        query: "OpenDex".into(),
+                        limit: 3,
+                    },
+                )
+                .await?;
+            Ok(result.sources.len())
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
 async fn open_web_source(url: String) -> Reply<()> {
     reply(
         async {
@@ -1563,6 +1584,7 @@ pub fn run() {
             mcp_get_prompt,
             save_settings,
             save_web_search,
+            test_web_search,
             open_web_source,
             export_settings_backup,
             preview_settings_backup,
