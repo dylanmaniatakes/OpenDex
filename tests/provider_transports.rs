@@ -279,6 +279,8 @@ fn server(address: String, current_protocol: bool) -> Server {
         has_secret: false,
         enabled: true,
         blocked_tools: vec![],
+        tool_permission: None,
+        tool_permissions: Default::default(),
         current_protocol,
     }
 }

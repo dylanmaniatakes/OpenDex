@@ -7,8 +7,8 @@ use crate::{
     providers::{self, Tool},
     state::{
         Appearance, BranchAction, Data, MAX_RESOURCE_BYTES, MAX_RESOURCES_PER_MESSAGE, McpResource,
-        Message, Mode, Permissions, Project, Provider, ProviderKind, Role, Rule, Server, Store,
-        Thread, ToolCall, Transport, delete_secret, write_secret,
+        McpScope, Message, Mode, Permissions, Project, Provider, ProviderKind, Role, Rule, Server,
+        Store, Thread, ToolCall, Transport, delete_secret, write_secret,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -214,6 +214,11 @@ fn remove_server(app: AppState<'_>, id: Uuid) -> Reply<()> {
             delete_secret(server.id, &server.address)?;
         }
         data.servers.retain(|server| server.id != id);
+        for thread in &mut data.threads {
+            if let McpScope::Selected(servers) = &mut thread.mcp_scope {
+                servers.retain(|server| *server != id);
+            }
+        }
         Ok(())
     }))
 }
@@ -246,10 +251,14 @@ async fn test_server(app: AppState<'_>, id: Uuid) -> Reply<ServerStatus> {
     )
 }
 
-fn enabled_mcp_server(data: &Data, id: Uuid) -> Result<&Server> {
+fn enabled_mcp_server<'a>(data: &'a Data, thread: &Thread, id: Uuid) -> Result<&'a Server> {
     ensure!(
         data.permissions.effective().mcp != Rule::Deny,
         "This permission profile disables MCP."
+    );
+    ensure!(
+        thread.mcp_scope.includes(id),
+        "This MCP server is unavailable in the current conversation."
     );
     data.servers
         .iter()
@@ -261,7 +270,7 @@ async fn connect_context(app: &Desktop, thread: Uuid, id: Uuid) -> Result<Connec
     app.ensure_idle(thread)?;
     let data = app.store.snapshot();
     let thread = fetch_thread(&data, thread)?;
-    let server = enabled_mcp_server(&data, id)?;
+    let server = enabled_mcp_server(&data, thread, id)?;
     let root = if server.transport == Transport::Stdio {
         thread
             .workspace
@@ -429,6 +438,7 @@ fn insert_thread(data: &mut Data, mode: Mode, project: Option<Project>) -> Threa
         provider_id: provider.map(|provider| provider.id),
         model_id,
         instructions: String::new(),
+        mcp_scope: McpScope::default(),
         parent_thread: None,
     };
     data.active_thread = Some(thread.id);
@@ -485,6 +495,7 @@ struct ThreadChanges {
     project: Option<Uuid>,
     clear_workspace: Option<bool>,
     instructions: Option<String>,
+    mcp_scope: Option<McpScope>,
 }
 
 #[derive(Deserialize)]
@@ -496,12 +507,17 @@ struct Selection {
 #[tauri::command]
 fn edit_thread(app: AppState<'_>, id: Uuid, changes: ThreadChanges) -> Reply<Thread> {
     reply((|| {
-        app.ensure_idle(id)?;
         let workspace = changes
             .workspace
             .as_deref()
             .map(agent::checked_root)
             .transpose()?;
+        // Keep the edit atomic with respect to a turn taking its settings snapshot.
+        let runs = app.runs.lock().expect("runs lock");
+        ensure!(
+            !runs.contains_key(&id),
+            "This conversation already has a turn in progress."
+        );
         app.store.change(|data| {
             if let Some(selection) = &changes.selection {
                 let provider = provider(data, selection.provider)?;
@@ -511,6 +527,14 @@ fn edit_thread(app: AppState<'_>, id: Uuid, changes: ThreadChanges) -> Reply<Thr
                         "Add the model to this provider's list first."
                     );
                 }
+            }
+            if let Some(McpScope::Selected(servers)) = &changes.mcp_scope {
+                ensure!(
+                    servers
+                        .iter()
+                        .all(|id| data.servers.iter().any(|server| server.id == *id)),
+                    "An MCP server in the selection no longer exists."
+                );
             }
             let has_project_change = workspace.is_some()
                 || changes.project.is_some()
@@ -540,6 +564,9 @@ fn edit_thread(app: AppState<'_>, id: Uuid, changes: ThreadChanges) -> Reply<Thr
             }
             if let Some(instructions) = changes.instructions {
                 thread.instructions = instructions;
+            }
+            if let Some(scope) = changes.mcp_scope {
+                thread.mcp_scope = scope;
             }
             if has_project_change {
                 thread.project_id = project.as_ref().map(|project| project.id);
@@ -798,8 +825,18 @@ impl ToolSession {
             sessions: vec![],
             used: 0,
         };
-        if session.turn.rules.mcp != Rule::Deny {
-            for server in data.servers.iter().filter(|server| server.enabled).take(20) {
+        let global = session.turn.rules.mcp;
+        if global != Rule::Deny {
+            for server in data
+                .servers
+                .iter()
+                .filter(|server| {
+                    server.enabled
+                        && thread.mcp_scope.includes(server.id)
+                        && server.server_tool_rule(global) != Rule::Deny
+                })
+                .take(20)
+            {
                 let connect = async {
                     let mut connection = mcp::Connection::connect(
                         &session.turn.app.client,
@@ -817,7 +854,7 @@ impl ToolSession {
                         session.sessions.push(connection);
                         for mut tool in catalog
                             .into_iter()
-                            .filter(|tool| !server.blocked_tools.contains(&tool.name))
+                            .filter(|tool| server.tool_rule(global, &tool.name) != Rule::Deny)
                         {
                             let suffix: String = tool
                                 .name
@@ -904,7 +941,7 @@ impl ToolSession {
                         name,
                         &call.arguments,
                         &server.server.name,
-                        self.turn.rules.mcp
+                        server.server.tool_rule(self.turn.rules.mcp, name)
                     )
                     .await,
                 "MCP call declined."
@@ -1087,14 +1124,14 @@ struct Prompt {
     resources: Vec<McpResource>,
 }
 
-fn validate_resources(data: &Data, resources: &[McpResource]) -> Result<()> {
+fn validate_resources(data: &Data, thread: &Thread, resources: &[McpResource]) -> Result<()> {
     ensure!(
         resources.len() <= MAX_RESOURCES_PER_MESSAGE,
         "Attach up to eight MCP resources per message."
     );
     let mut size = 0;
     for resource in resources {
-        enabled_mcp_server(data, resource.server_id)?;
+        enabled_mcp_server(data, thread, resource.server_id)?;
         ensure!(
             !resource.name.trim().is_empty()
                 && resource.name.len() <= 512
@@ -1177,7 +1214,7 @@ async fn run_user_turn(
     let new_message = matches!(&input, TurnInput::New(_));
     let message = match input {
         TurnInput::New(prompt) => {
-            validate_resources(&data, &prompt.resources)?;
+            validate_resources(&data, thread, &prompt.resources)?;
             let mut message = Message::new(Role::User, prompt.text.trim());
             message.attachment = prompt
                 .attachment

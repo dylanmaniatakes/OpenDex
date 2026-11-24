@@ -2,17 +2,22 @@ import { button, el, field } from './dom.js';
 
 // Fetch only the server the user selects. Responses from a closed picker or
 // a previous server selection cannot replace the current view.
-export function mcpContextPicker({ servers, allowed, invoke, thread, show, close, settings, addResource, insertPrompt }) {
+export function mcpContextPicker({ servers, manageScope, allowed, invoke, thread, show, close, settings, addResource, insertPrompt }) {
   const panel = el('div', { class: 'details-form mcp-context' });
   show('MCP context', panel);
   if (!allowed || !servers.length) {
-    panel.append(el('p', { class: 'muted' }, allowed
-      ? 'Enable a server to browse its resources and prompts.'
-      : 'The current permission profile disables MCP.'),
-    button(allowed ? 'Open MCP settings' : 'Open permissions', () => {
-      close();
-      settings(allowed ? 'mcp' : 'permissions');
-    }));
+    if (allowed && manageScope) {
+      panel.append(el('p', { class: 'muted' }, 'This conversation has no selected, enabled MCP servers.'),
+        button('Conversation settings', manageScope));
+    } else {
+      panel.append(el('p', { class: 'muted' }, allowed
+        ? 'Enable a server to browse its resources and prompts.'
+        : 'The current permission profile disables MCP.'),
+      button(allowed ? 'Open MCP settings' : 'Open permissions', () => {
+        close();
+        settings(allowed ? 'mcp' : 'permissions');
+      }));
+    }
     return;
   }
 

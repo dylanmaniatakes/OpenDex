@@ -1,4 +1,6 @@
-use opendex::state::{Attachment, BranchAction, McpResource, Message, Mode, Role, Store, Thread};
+use opendex::state::{
+    Attachment, BranchAction, McpResource, McpScope, Message, Mode, Role, Store, Thread,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -104,11 +106,16 @@ fn code_agent_branch_preserves_project_and_history_at_the_selected_message() {
     source.mode = Mode::Agent;
     source.project_id = Some(Uuid::new_v4());
     source.workspace = Some("/tmp/example-worktree".into());
+    let server = Uuid::new_v4();
+    assert!(source.mcp_scope.includes(server));
+    source.mcp_scope = McpScope::Selected(vec![server]);
     let branch = source
         .branch_at(source.messages[2].id, BranchAction::Continue)
         .unwrap();
     assert_eq!(branch.workspace, source.workspace);
     assert_eq!(branch.project_id, source.project_id);
+    assert_eq!(branch.mcp_scope, source.mcp_scope);
+    assert!(!branch.mcp_scope.includes(Uuid::new_v4()));
     assert_eq!(branch.messages.len(), 3);
     assert_eq!(branch.messages[1].role, Role::Tool);
     assert!(
@@ -131,5 +138,9 @@ fn code_agent_branch_preserves_project_and_history_at_the_selected_message() {
     let persisted = Store::open(directory.path()).unwrap().snapshot();
     assert_eq!(persisted.active_thread, Some(branch.id));
     assert_eq!(persisted.threads[1].parent_thread, Some(source.id));
+    assert_eq!(
+        persisted.threads[1].mcp_scope,
+        McpScope::Selected(vec![server])
+    );
     assert_eq!(persisted.threads[0].messages.len(), 4);
 }

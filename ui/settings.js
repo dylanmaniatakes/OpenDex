@@ -30,6 +30,8 @@ const profileRules = {
   full_access: { read: 'allow', write: 'allow', command: 'allow', mcp: 'ask', network: true },
 };
 
+const approvalOptions = [['ask', 'Ask every time'], ['deny', 'Deny']];
+
 export const permissionName = (key) => profiles.find(([id]) => id === key)?.[1] ?? 'Workspace';
 
 function input(value, attrs = {}) {
@@ -312,7 +314,10 @@ export function settingsPanel(api) {
     let enabled = server.enabled;
     let current = server.current_protocol;
     let forget = false;
-    const blocked = new Set(server.blocked_tools);
+    let toolPermission = server.tool_permission ?? '';
+    // Keep the legacy deny switches when migrating a configuration to rule selectors.
+    const toolPermissions = new Map(Object.entries(server.tool_permissions ?? {}));
+    for (const name of server.blocked_tools ?? []) toolPermissions.set(name, 'deny');
     const status = el('div', { class: 'form-status', role: 'status' });
 
     function displayTransport() {
@@ -321,18 +326,24 @@ export function settingsPanel(api) {
         field(transport === 'stdio' ? 'Executable' : 'Streamable HTTP URL', address),
         ...(transport === 'stdio'
           ? [field('Arguments as JSON', args), field('Environment variable names', env, 'Values are read from the OpenDex process environment.')]
-          : [field('Bearer key', secret), server.has_secret && check('Forget saved key', forget, (value) => { forget = value; })]),
+          : [field('Bearer key', secret), ...(server.has_secret
+            ? [check('Forget saved key', forget, (value) => { forget = value; })] : [])]),
       );
     }
     const transportSelect = options([['stdio', 'Local stdio'], ['http', 'Streamable HTTP']], transport,
       (value) => { transport = value; displayTransport(); });
     displayTransport();
     const match = tested.get(server.id);
-    const toolList = match && el('div', { class: 'wide mcp-tools' },
-      el('h4', {}, `Tools · MCP ${match.version}`),
-      match.tools.length ? match.tools.map((tool) => el('div', { class: 'tool-switch' },
-        check(tool.name, !blocked.has(tool.name), (value) => value ? blocked.delete(tool.name) : blocked.add(tool.name)),
-        tool.description && el('span', { class: 'muted' }, tool.description))) : el('p', { class: 'muted' }, 'This server exposes no tools.'));
+    const tools = new Map((match?.tools ?? []).map((tool) => [tool.name, tool.description]));
+    for (const name of toolPermissions.keys()) {
+      if (!tools.has(name)) tools.set(name, '');
+    }
+    const toolList = (match || tools.size > 0) && el('div', { class: 'wide mcp-tools' },
+      el('h4', {}, match ? `Tools · MCP ${match.version}` : 'Saved tool permissions'),
+      tools.size ? Array.from(tools, ([name, description]) => el('div', { class: 'mcp-tool-rule' },
+        field(name, options([['', 'Inherit server rule'], ...approvalOptions], toolPermissions.get(name),
+          (value) => value ? toolPermissions.set(name, value) : toolPermissions.delete(name)), description)))
+        : el('p', { class: 'muted' }, 'This server exposes no tools.'));
     const saveButton = el('button', { type: 'submit', class: 'button primary' }, icon('check', 16), adding ? 'Add server' : 'Save server');
     const actions = el('div', { class: 'form-actions wide' }, saveButton, status);
     if (adding) actions.append(button('Cancel', () => { newServer = false; render(); }));
@@ -356,6 +367,8 @@ export function settingsPanel(api) {
       field('Display name', name), field('Transport', transportSelect), transportFields,
       check('Enable in chat and agent turns', enabled, (value) => { enabled = value; }),
       check('Use MCP 2026-07-28', current, (value) => { current = value; }),
+      field('Server tool approvals', options([['', 'Inherit permission profile'], ...approvalOptions], toolPermission,
+        (value) => { toolPermission = value; }), 'The strictest rule applies to model tool calls.'),
       el('p', { class: 'field-note wide' }, 'Enabled local servers launch as your user. Only connect executables and endpoints you trust.'),
       toolList, actions,
     );
@@ -370,7 +383,8 @@ export function settingsPanel(api) {
       const save = () => run(saveButton, status, async () => {
         const value = {
           ...server, name: name.value, transport, address: address.value, args: parsed, enabled,
-          env: transport === 'stdio' ? lines(env.value) : [], blocked_tools: [...blocked], current_protocol: current,
+          env: transport === 'stdio' ? lines(env.value) : [], current_protocol: current, blocked_tools: [],
+          tool_permission: toolPermission || null, tool_permissions: Object.fromEntries(toolPermissions),
         };
         const saved = await api.invoke('save_server', { value, secret: transport === 'http' ? secret.value || null : null, forget });
         if (value.transport !== server.transport || value.address !== server.address || value.current_protocol !== server.current_protocol) {

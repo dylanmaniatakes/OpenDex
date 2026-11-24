@@ -44,9 +44,11 @@ On macOS I run scoped commands through Seatbelt. They can read approved project 
 
 ## MCP servers
 
-In **Settings → MCP Servers**, I can add a local stdio command or a Streamable HTTP URL. Local servers take a JSON array of arguments and a list of environment variable names. HTTP servers can use a bearer key. **Test & list tools** checks the connection and exposes individual tool switches. I can enable the server for turns, then apply the MCP permission rule to its calls.
+In **Settings → MCP Servers**, I can add a local stdio command or a Streamable HTTP URL. Local servers take a JSON array of arguments and a list of environment variable names. HTTP servers can use a bearer key. I can set tool approvals for a whole server, then use **Test & list tools** to set rules for individual tools. The strictest rule among the permission profile, server, and tool applies to model calls. A denied tool is hidden from the model.
 
-I use the **Add MCP context** button in either composer to browse an enabled server. I can search for a resource, preview the text, and attach it alongside a local file. For a resource template I enter the filled-in URI. For a prompt I fill in its arguments, preview the result, then insert the text into my draft. When a prompt includes assistant examples, I see them labeled in the draft. The model receives the draft and any selected resources when I send the message.
+In **Conversation settings → MCP servers**, I can use all enabled servers or select specific servers for that conversation. An empty selection keeps MCP servers out of that conversation. Branches inherit the selection.
+
+I use the **Add MCP context** button in either composer to browse a server enabled for the conversation. I can search for a resource, preview the text, and attach it alongside a local file. For a resource template I enter the filled-in URI. For a prompt I fill in its arguments, preview the result, then insert the text into my draft. When a prompt includes assistant examples, I see them labeled in the draft. The model receives the draft and any selected resources when I send the message.
 
 I currently support initialized MCP sessions and the July 2026 protocol revision for tools, resources, and prompts. The MCP protocol selector is on each server. [MCP transport specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports)
 
@@ -77,6 +79,8 @@ cargo test --locked --test provider_transports installed_codex_server -- --ignor
 ```
 
 I use loopback fixtures to test each wire format and MCP transport without account credentials. I verified Gemini model discovery, streaming chat, and a Code Agent file read through the desktop app against a native-protocol fixture. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, including edited and retried branches, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, approved a file edit and an MCP call in a disposable project, and sent a rendered MCP prompt with a text resource to a local Ollama model.
+
+I verified conversation-level MCP selection with two loopback servers in the macOS app. I declined and approved individual tool calls under a globally permissive profile, checked that a denied tool stayed out of the model request, and ran a Code Agent conversation with an empty selection.
 
 ### Source layout
 

@@ -1,4 +1,4 @@
-import { $, button, el, field, markdown } from './dom.js';
+import { $, button, check, el, field, markdown, options } from './dom.js';
 import { icon } from './icons.js';
 import { mcpContextPicker } from './mcp-context.js';
 import { settingsPanel, permissionName } from './settings.js';
@@ -335,12 +335,26 @@ function threadMenu(thread) {
   const busy = turns.has(id);
   const title = el('input', { type: 'text', value: thread.title, required: true, maxlength: 130, 'aria-label': 'Conversation title' });
   const instructions = el('textarea', { rows: 5, maxlength: 32000 }, thread.instructions);
+  let scope = thread.mcp_scope?.mode ?? 'all';
+  const selected = new Set(thread.mcp_scope?.servers);
+  const serverList = el('div', { class: 'mcp-server-selection', hidden: scope === 'all' },
+    data.servers.length
+      ? data.servers.map((server) => check(server.name + (server.enabled ? '' : ' (disabled in Settings)'),
+        selected.has(server.id), (value) => value ? selected.add(server.id) : selected.delete(server.id)))
+      : el('p', { class: 'muted' }, 'Add an MCP server in Settings to select it here.'));
+  const serverScope = options([['all', 'All enabled servers'], ['selected', 'Only selected servers']], scope, (value) => {
+    scope = value;
+    serverList.hidden = scope === 'all';
+  }, { disabled: busy });
   const form = el('form', { class: 'details-form', onsubmit: transient(async (event) => {
     event.preventDefault();
-    updateThread(await invoke('edit_thread', { id, changes: { title: title.value, instructions: instructions.value } }));
+    const mcp_scope = scope === 'all' ? { mode: 'all' } : { mode: 'selected', servers: [...selected] };
+    updateThread(await invoke('edit_thread', { id, changes: { title: title.value, instructions: instructions.value, mcp_scope } }));
     $('details').close();
   }) }, field('Title', title),
   field('Thread instructions', instructions),
+  field('MCP servers', serverScope),
+  serverList,
   el('div', { class: 'form-actions' }, el('button', { type: 'submit', class: 'button primary', disabled: busy }, 'Save conversation'),
     button('Export Markdown', transient(async () => {
       const path = await io.save({ title: 'Export conversation', defaultPath: 'conversation.md', filters: [{ name: 'Markdown', extensions: ['md'] }] });
@@ -610,8 +624,11 @@ function openMcpContext() {
   const policy = data.permissions;
   const allowed = policy.profile !== 'read_only' && !(policy.profile === 'custom' && policy.mcp === 'deny');
   const close = () => $('details').close();
+  const selected = thread.mcp_scope?.servers;
+  const enabled = data.servers.filter((server) => server.enabled);
   mcpContextPicker({
-    servers: data.servers.filter((server) => server.enabled),
+    servers: enabled.filter((server) => !selected || selected.includes(server.id)),
+    manageScope: selected && enabled.length > 0 ? () => threadMenu(thread) : null,
     allowed, invoke, thread: thread.id, show: showDetails, close,
     settings: (tab) => settings.open(tab),
     addResource: (resource) => {

@@ -1,10 +1,45 @@
 use opendex::{
     agent,
-    state::{Mode, Permissions, Profile, Rule, Store},
+    state::{McpScope, Mode, Permissions, Profile, Rule, Server, Store},
 };
 use serde_json::json;
 use std::{fs, net::TcpListener};
 use tempfile::tempdir;
+use uuid::Uuid;
+
+#[test]
+fn mcp_tool_rules_only_narrow_the_profile_and_preserve_legacy_blocks() {
+    let mut server: Server = serde_json::from_value(json!({
+        "id": Uuid::new_v4(), "name": "Fixture", "transport": "http",
+        "address": "http://localhost/mcp", "blocked_tools": ["legacy"]
+    }))
+    .unwrap();
+    assert_eq!(server.tool_rule(Rule::Allow, "legacy"), Rule::Deny);
+    assert_eq!(server.tool_rule(Rule::Allow, "inherited"), Rule::Allow);
+
+    server.tool_permission = Some(Rule::Ask);
+    server.tool_permissions.insert("allow".into(), Rule::Allow);
+    server.tool_permissions.insert("deny".into(), Rule::Deny);
+    assert_eq!(server.tool_rule(Rule::Allow, "inherited"), Rule::Ask);
+    assert_eq!(server.tool_rule(Rule::Allow, "allow"), Rule::Ask);
+    assert_eq!(server.tool_rule(Rule::Allow, "deny"), Rule::Deny);
+    assert_eq!(server.tool_rule(Rule::Deny, "allow"), Rule::Deny);
+    server.tool_permission = Some(Rule::Deny);
+    assert_eq!(server.tool_rule(Rule::Allow, "allow"), Rule::Deny);
+
+    server.tool_permission = Some(Rule::Allow);
+    server.tool_permissions.insert("ask".into(), Rule::Ask);
+    assert_eq!(server.tool_rule(Rule::Allow, "ask"), Rule::Ask);
+    assert_eq!(server.tool_rule(Rule::Ask, "allow"), Rule::Ask);
+}
+
+#[test]
+fn empty_mcp_selection_disables_servers_after_serialization() {
+    let scope = McpScope::Selected(vec![]);
+    let restored: McpScope = serde_json::from_value(serde_json::to_value(&scope).unwrap()).unwrap();
+    assert_eq!(restored, scope);
+    assert!(!restored.includes(Uuid::new_v4()));
+}
 
 #[test]
 fn app_state_survives_reopen_and_rejects_overlapping_processes() {

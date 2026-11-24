@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -201,11 +202,33 @@ pub struct Server {
     pub enabled: bool,
     #[serde(default)]
     pub blocked_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_permission: Option<Rule>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_permissions: BTreeMap<String, Rule>,
     #[serde(default)]
     pub current_protocol: bool,
 }
 
 impl Server {
+    /// Server and tool rules can only narrow the active permission profile.
+    /// Existing blocks remain in force for configurations saved by older builds.
+    pub fn tool_rule(&self, global: Rule, name: &str) -> Rule {
+        if self.blocked_tools.iter().any(|blocked| blocked == name) {
+            return Rule::Deny;
+        }
+        self.server_tool_rule(global).min(
+            self.tool_permissions
+                .get(name)
+                .copied()
+                .unwrap_or(Rule::Allow),
+        )
+    }
+
+    pub fn server_tool_rule(&self, global: Rule) -> Rule {
+        global.min(self.tool_permission.unwrap_or(Rule::Allow))
+    }
+
     pub fn validate(&mut self) -> Result<()> {
         self.name = self.name.trim().into();
         self.address = self.address.trim().into();
@@ -231,7 +254,8 @@ impl Server {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// Declaration order is from most to least restrictive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Rule {
     Deny,
@@ -514,6 +538,28 @@ pub enum BranchAction {
     Edit { text: String },
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", content = "servers", rename_all = "snake_case")]
+pub enum McpScope {
+    #[default]
+    All,
+    Selected(Vec<Uuid>),
+}
+
+impl McpScope {
+    pub fn is_all(&self) -> bool {
+        matches!(self, Self::All)
+    }
+
+    /// An empty selection deliberately gives the conversation no MCP servers.
+    pub fn includes(&self, id: Uuid) -> bool {
+        match self {
+            Self::All => true,
+            Self::Selected(servers) => servers.contains(&id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {
     pub id: Uuid,
@@ -531,6 +577,8 @@ pub struct Thread {
     pub model_id: Option<String>,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default, skip_serializing_if = "McpScope::is_all")]
+    pub mcp_scope: McpScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_thread: Option<Uuid>,
 }
@@ -584,6 +632,7 @@ impl Thread {
             provider_id: self.provider_id,
             model_id: self.model_id.clone(),
             instructions: self.instructions.clone(),
+            mcp_scope: self.mcp_scope.clone(),
             parent_thread: Some(self.id),
         })
     }

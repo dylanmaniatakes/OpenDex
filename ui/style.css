@@ -305,8 +305,7 @@ input[type="range"], input[type="checkbox"] { accent-color: var(--accent); }
 .chip { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); background: var(--panel-raised); border: 1px solid var(--line); border-radius: min(var(--radius), 7px); padding: 3px 5px 3px 8px; font: .73rem/1.3 var(--mono); overflow-wrap: anywhere; }
 .file-chip { margin: 3px 0; }
 .mcp-tools, .account-panel { display: grid; gap: 9px; }
-.tool-switch { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
-.tool-switch span { font-size: .76rem; margin-left: 24px; }
+.mcp-tool-rule { padding: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
 .account-panel { border-top: 1px solid var(--line); padding-top: 13px; }
 .account-url { display: flex; align-items: center; gap: 8px; font-size: .78rem; color: var(--muted); }
 .empty-settings { display: grid; justify-items: center; gap: 8px; text-align: center; color: var(--muted); padding: 31px 14px; border: 1px dashed var(--line-strong); border-radius: var(--radius); font-size: .84rem; }
@@ -325,6 +324,7 @@ input[type="range"], input[type="checkbox"] { accent-color: var(--accent); }
 .details-shell h2 { font-size: 1rem; }
 .details-form { display: grid; gap: var(--space); padding: var(--space); font-size: .87rem; line-height: 1.55; }
 .details-form .form-actions { min-width: 0; }
+.mcp-server-selection:not([hidden]) { display: grid; gap: 6px; }
 .git-diff { margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: min(var(--radius), 8px); background: var(--input); max-height: 55dvh; overflow: auto; font-size: .75rem; }
 .git-diff .added { color: var(--accent-text); }
 .git-diff .removed { color: var(--danger); }
