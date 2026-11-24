@@ -9,6 +9,7 @@ fi
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/opendex-target}"
 export COPYFILE_DISABLE=1
+find "$CARGO_TARGET_DIR" -type f -name '._*' -delete 2>/dev/null || true
 
 profile="${1:-release}"
 case "$profile" in
