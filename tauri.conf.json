@@ -13,7 +13,8 @@
       "ui/icons.js",
       "ui/settings.js",
       "ui/backup-settings.js",
-      "ui/mcp-context.js"
+      "ui/mcp-context.js",
+      "ui/model-filter.js"
     ]
   },
   "app": {

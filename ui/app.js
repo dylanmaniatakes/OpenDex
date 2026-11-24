@@ -3,6 +3,7 @@ import { matchesHistory } from './history-search.js';
 import { icon } from './icons.js';
 import { mcpContextPicker } from './mcp-context.js';
 import { settingsPanel, permissionName } from './settings.js';
+import { filterComposerChoices } from './model-filter.js';
 
 const tauri = window.__TAURI__;
 const invoke = (command, args = {}) => tauri.core.invoke(command, args);
@@ -406,22 +407,18 @@ async function setSelection(thread, provider, model) {
 }
 
 function modelPicker(thread) {
-  const provider = data.providers.find((item) => item.id === thread?.provider_id) ?? data.providers[0];
-  const model = provider?.models.includes(thread?.model_id) ? thread.model_id : null;
-  const query = $('model-filter').value.trim().toLocaleLowerCase();
-  const matches = (value) => query ? `${value}`.toLocaleLowerCase().includes(query) : true;
-  const visibleProviders = data.providers.filter((item) => matches(item.name) || item.models.some(matches));
-  const items = visibleProviders.map((item) => el('option', { value: item.id }, item.name));
-  $('provider-select').replaceChildren(...(items.length ? items : [el('option', { value: '' }, 'No matching provider')]));
-  $('provider-select').value = items.some(({value}) => value === provider?.id) ? provider.id : items[0]?.value ?? '';
-  const selectedProvider = data.providers.find((item) => item.id === $('provider-select').value) ?? provider;
-  const models = (selectedProvider?.models ?? []).filter(matches);
+  const { providers, provider, models, selectedModel } = filterComposerChoices(data.providers, {
+    selectedProviderId: thread?.provider_id,
+    selectedModelId: thread?.model_id,
+    query: $('model-filter').value,
+  });
+  $('provider-select').replaceChildren(...(providers.length ? providers.map((item) => el('option', { value: item.id }, item.name)) : [el('option', { value: '' }, 'No matching provider')]));
+  $('provider-select').value = provider?.id ?? '';
   $('model-select').replaceChildren(
-    ...models.length ? [] : [el('option', { value: '' }, selectedProvider?.models.length ? 'No matching model' : 'Add models')],
-    ...models.map((id) => el('option', { value: id }, id)),
+    ...models.length ? models.map((id) => el('option', { value: id }, id)) : [el('option', { value: '' }, provider?.models.length ? 'No matching model' : 'Add models')],
   );
-  $('model-select').value = models.includes(model) ? model : models[0] ?? '';
-  $('provider-select').disabled = Boolean(live()) || !items.length;
+  $('model-select').value = selectedModel;
+  $('provider-select').disabled = Boolean(live()) || !providers.length;
   $('model-select').disabled = Boolean(live()) || !models.length;
   $('permission-label').replaceChildren(...mode === 'agent' ? [
     button(permissionName(data.permissions.profile), () => settings.open('permissions'), {
