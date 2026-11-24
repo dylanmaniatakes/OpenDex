@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod anthropic;
 pub mod backup;
+pub mod claude;
 pub mod codex;
 #[cfg(feature = "desktop")]
 pub mod desktop;

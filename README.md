@@ -36,7 +36,7 @@ For Gemini, I can discover models that support content generation, add model IDs
 
 For a ChatGPT account, I install the [Codex CLI](https://learn.chatgpt.com/docs/cli), add the **ChatGPT Account** adapter, and click **Connect account**. The Codex executable opens the official browser flow and manages its own credentials. OpenDex uses a dedicated Codex home so the connection is independent of my terminal setup. The browser flow and subscribed inference are still part of my live verification checklist. [Codex app-server authentication](https://learn.chatgpt.com/docs/app-server#auth-endpoints)
 
-I use an Anthropic Console API key for Claude through the Messages API. The current **Claude account** option is an unverified prototype that uses direct OAuth and stores session tokens. I have identified that this design conflicts with Anthropic’s documented authentication rules for third-party applications, so I do not consider it ready for release. Anthropic documents an integration route where the user authenticates through an installed, unmodified Claude Code binary. I am evaluating that route for subscription support. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+I use an Anthropic Console API key for Claude through the Messages API. The current **Claude account** option is an unverified prototype that uses direct OAuth and stores session tokens. I have identified that this design conflicts with Anthropic’s documented authentication rules for third-party applications, so I do not consider it ready for release. Anthropic documents an integration route where the user authenticates through an installed, unmodified Claude Code binary. I have started a Rust transport for that route. It initializes an installed Claude Code executable in a dedicated configuration folder, with native tools, hooks, project settings, and external MCP discovery disabled. The transport is not yet connected to the composer or account controls. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
 
 Token parsing checks cover refreshed access tokens, rotated refresh tokens, and retention of saved account details. Those checks validate the prototype’s local data handling. Live account sign-in and inference have not been verified.
 
@@ -112,6 +112,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo test --locked --test provider_transports installed_codex_server -- --ignored
 cargo test --locked --test provider_transports installed_codex_keyring_format -- --ignored
+cargo test --locked --test claude_transport installed_claude -- --ignored
 ```
 
 I use loopback fixtures to test each wire format and MCP transport without account credentials. I verified Gemini model discovery, streaming chat, and a Code Agent file read through the desktop app against a native-protocol fixture. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, including edited and retried branches, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, approved a file edit and an MCP call in a disposable project, and sent a rendered MCP prompt with a text resource to a local Ollama model.
@@ -128,6 +129,8 @@ I tested SearXNG searches and Ollama page retrieval in the macOS app with local 
 
 I tested image generation in both modes with a local Images API fixture. I verified inline Base64 and same-origin URL results, exported a byte-for-byte copy, and confirmed that a regular follow-up still used the original text model. I also stopped a pending generation and reopened its prompt.
 
+I tested the new Claude Code transport against the installed executable without sending an inference prompt or reading subscription credentials. It returned its model list from an isolated configuration folder. Fixtures cover startup arguments, rejection of unexpected native tool requests, unrelated control responses, and malformed or failed initialization. Live Claude account sign-in and inference remain unverified.
+
 ### Source layout
 
 - `src/providers` contains inventory discovery, API payloads, and streaming decoders.
@@ -139,6 +142,7 @@ I tested image generation in both modes with a local Images API fixture. I verif
 - `src/web.rs` sends search and page requests to the configured service and normalizes the sources.
 - `src/images.rs` handles image requests, raster input detection, and file export.
 - `src/codex.rs` connects to the optional Codex app server.
+- `src/claude.rs` contains the initial Claude Code streaming-control transport.
 - `src/desktop.rs` coordinates turns, approval prompts, and desktop commands.
 - `ui` contains the desktop screens, appearance controls, and Markdown display.
 
