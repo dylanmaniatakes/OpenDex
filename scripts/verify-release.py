@@ -55,6 +55,7 @@ for name, passed in [
     ("bundle ad-hoc signature verified", codesign_verify.returncode == 0),
     ("manifest signature state", release_bundle.get("signature") == "adhoc"),
     ("bundle host architecture matches host", manifest.get("host", {}).get("arch") == platform.machine()),
+    ("build came from a clean repository", manifest.get("artifact", {}).get("dirty") is False),
 ]:
     check(passed, name)
 
