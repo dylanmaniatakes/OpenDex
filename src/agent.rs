@@ -1,5 +1,6 @@
 //! Workspace tools and the permission checks behind them.
 use crate::{
+    images::raster_mime,
     mcp::process_path,
     providers::Tool,
     state::{Attachment, Mode, Permissions, Profile, Rule},
@@ -209,16 +210,8 @@ fn read_attachment(name: &str, canonical: &Path) -> Result<(Attachment, u64)> {
     let header = &header[..n];
     let mime = if header.starts_with(b"%PDF-") {
         Some("application/pdf")
-    } else if header.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if header.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
-    } else if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if header.starts_with(b"RIFF") && header.get(8..12) == Some(b"WEBP") {
-        Some("image/webp")
     } else {
-        None
+        raster_mime(header)
     };
     let limit = if mime.is_some() { MAX_MEDIA } else { MAX_FILE };
     let mut bytes = header.to_vec();

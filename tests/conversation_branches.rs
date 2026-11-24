@@ -80,6 +80,26 @@ fn legacy_single_attachments_load_and_serialize_as_a_list() {
 }
 
 #[test]
+fn an_image_prompt_can_branch_without_becoming_a_chat_retry() {
+    let mut prompt = Message::new(Role::User, "Generate a mountain scene");
+    prompt.image_generation = Some(opendex::images::Config {
+        provider: Uuid::new_v4(),
+        model: "image-fixture".into(),
+        size: None,
+        quality: None,
+        request_base64: false,
+    });
+    let anchor = prompt.id;
+    let source = thread(vec![prompt]);
+    assert!(source.branch_at(anchor, BranchAction::Retry).is_err());
+    let branch = source.branch_at(anchor, BranchAction::Continue).unwrap();
+    assert_eq!(
+        branch.messages[0].image_generation,
+        source.messages[0].image_generation
+    );
+}
+
+#[test]
 fn retry_branches_at_the_prompt_for_the_selected_reply() {
     let earlier = Message::new(Role::Assistant, "Earlier reply");
     let anchor = earlier.id;

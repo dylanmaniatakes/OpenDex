@@ -3,6 +3,7 @@ pub mod backup;
 pub mod codex;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+pub mod images;
 pub mod mcp;
 pub mod providers;
 pub mod state;

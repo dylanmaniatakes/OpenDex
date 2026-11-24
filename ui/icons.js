@@ -22,6 +22,8 @@ const paths = {
   check: '<path d="m5 12 4 4L19 6"/>',
   copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
   search: '<circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/>',
+  image: '<rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="9" cy="9" r="1.5"/><path d="m4 17 5-5 3 3 3-4 5 6"/>',
+  download: '<path d="M12 4v11m-4-4 4 4 4-4M5 16v4h14v-4"/>',
   refresh: '<path d="M20 11a8 8 0 0 0-13.5-5L4 9m0-5v5h5m-5 4a8 8 0 0 0 13.5 5l2.5-3m0 5v-5h-5"/>',
   arrow: '<path d="M6 18 18 6M8 6h10v10"/>',
   terminal: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m7 9 3 3-3 3m6 0h4"/>',

@@ -1,5 +1,6 @@
 use opendex::{
     codex::Bridge,
+    images,
     mcp::Connection,
     providers::{self, Tool},
     state::{Attachment, Message, Provider, ProviderKind, Role, Server, Transport},
@@ -7,6 +8,7 @@ use opendex::{
 };
 use serde_json::{Value, json};
 use std::{
+    fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     path::PathBuf,
@@ -99,6 +101,71 @@ fn tool() -> Tool {
         description: "Read an example file".into(),
         schema: json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}),
     }
+}
+
+#[tokio::test]
+async fn image_generation_preserves_raster_bytes_and_provider_options() {
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aGfkAAAAASUVORK5CYII=";
+    let fixture = Fixture::new(3, |request| {
+        assert_eq!(
+            request.line.trim(),
+            "POST /api-prefix/images/generations HTTP/1.1"
+        );
+        assert_eq!(request.body["prompt"], "A fixture image");
+        assert_eq!(request.body["size"], "1024x1536");
+        assert_eq!(request.body["quality"], "medium");
+        let data = match request.body["model"].as_str().unwrap() {
+            "image-api" => {
+                assert!(request.headers.contains("x-opendex-test:"));
+                assert!(request.body.get("response_format").is_none());
+                json!({"b64_json":PNG})
+            }
+            "image-compatible" => {
+                assert_eq!(request.body["response_format"], "b64_json");
+                json!({"b64_json":PNG})
+            }
+            "image-remote-url" => json!({"url":"https://example.org/remote.png"}),
+            model => panic!("unexpected image model {model}"),
+        };
+        (
+            "application/json",
+            String::new(),
+            json!({"data":[data]}).to_string(),
+        )
+    });
+    let client = providers::client().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    for (kind, selected) in [
+        (ProviderKind::OpenAi, "image-api"),
+        (ProviderKind::OpenAiCompatible, "image-compatible"),
+        (ProviderKind::OpenAiCompatible, "image-remote-url"),
+    ] {
+        let mut connection = provider(&fixture, kind);
+        connection.headers = vec![("x-opendex-test".into(), "PATH".into())];
+        let mut config = images::Config {
+            provider: connection.id,
+            model: selected.into(),
+            size: Some("1024X1536".into()),
+            quality: Some("Medium".into()),
+            request_base64: true,
+        };
+        config.validate().unwrap();
+        let result = images::generate(&client, &connection, &config, "A fixture image").await;
+        if selected == "image-remote-url" {
+            assert!(result.unwrap_err().to_string().contains("another origin"));
+            continue;
+        }
+        let result = result.unwrap();
+        assert_eq!(result.media_type.as_deref(), Some("image/png"));
+        assert_eq!(result.text, PNG);
+        let path = directory.path().join(result.name.clone());
+        images::save(&result, &path).unwrap();
+        assert_eq!(
+            fs::read(path).unwrap(),
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, PNG).unwrap()
+        );
+    }
+    fixture.finish();
 }
 
 #[tokio::test]

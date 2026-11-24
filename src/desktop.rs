@@ -2,7 +2,7 @@
 //! The webview handles presentation and user input.
 use crate::{
     agent::{self, Capability},
-    backup, codex,
+    backup, codex, images,
     mcp::{self, Connection},
     providers::{self, Tool},
     state::{
@@ -132,6 +132,11 @@ fn save_provider(
         if changed && matches!(data.web_search, Some(web::Config::Ollama { provider }) if provider == value.id) {
             data.set_web_search(None);
         }
+        if data.image_generation.as_ref().is_some_and(|config|
+            config.provider == value.id && config.resolve(&data.providers).is_err()
+        ) {
+            data.image_generation = None;
+        }
         Ok(value)
     }))
 }
@@ -146,6 +151,13 @@ fn remove_provider(app: AppState<'_>, id: Uuid) -> Reply<()> {
         data.providers.retain(|value| value.id != id);
         if matches!(data.web_search, Some(web::Config::Ollama { provider }) if provider == id) {
             data.set_web_search(None);
+        }
+        if data
+            .image_generation
+            .as_ref()
+            .is_some_and(|config| config.provider == id)
+        {
+            data.image_generation = None;
         }
         for thread in &mut data.threads {
             if thread.provider_id == Some(id) {
@@ -1209,7 +1221,12 @@ async fn complete_turn(
         .messages
         .into_iter()
         .filter_map(|mut message| {
-            if message.incomplete || message.role == Role::Tool || !message.has_content() {
+            // Image requests go to the selected image service through a separate user action.
+            if message.incomplete
+                || message.role == Role::Tool
+                || message.image_generation.is_some()
+                || !message.has_content()
+            {
                 return None;
             }
             message.calls.clear();
@@ -1354,6 +1371,91 @@ enum TurnInput {
     Existing(Uuid),
 }
 
+#[derive(Deserialize)]
+struct ImagePrompt {
+    thread: Uuid,
+    text: String,
+    config: images::Config,
+}
+
+#[tauri::command]
+async fn generate_image(
+    app: AppState<'_>,
+    window: AppHandle,
+    mut prompt: ImagePrompt,
+) -> Reply<bool> {
+    reply(async {
+        let id = prompt.thread;
+        prompt.config.validate()?;
+        let (provider, cancel, _guard) = {
+            let mut runs = app.runs.lock().expect("runs lock");
+            ensure!(!runs.contains_key(&id), "This conversation already has a turn in progress.");
+            let provider = app.store.inspect(|data| {
+                fetch_thread(data, id)?;
+                prompt.config.resolve(&data.providers).cloned()
+            })?;
+            let cancel = CancellationToken::new();
+            runs.insert(id, cancel.clone());
+            (provider, cancel, RunGuard { state: Arc::clone(&app), thread: id, root: None })
+        };
+        let text = prompt.text.trim();
+        let file = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let _ = window.emit("opendex-turn", json!({"thread":id,"kind":"stopped","details":{}}));
+                return Ok(false);
+            }
+            result = images::generate(&app.client, &provider, &prompt.config, text) => result?,
+        };
+        let mut user = Message::new(Role::User, text);
+        user.image_generation = Some(prompt.config.clone());
+        let mut output = Message::new(Role::Assistant, "");
+        output.model = Some(prompt.config.model.clone());
+        output.provider = Some(provider.id);
+        output.image_generation = Some(prompt.config.clone());
+        output.attachments.push(file);
+        app.store.change(|data| {
+            let thread = thread_mut(data, id)?;
+            thread.append_user_message(user);
+            thread.messages.push(output);
+            if prompt.config.resolve(&data.providers).is_ok() {
+                data.image_generation = Some(prompt.config);
+            }
+            Ok(true)
+        })
+    }.await)
+}
+
+#[tauri::command]
+async fn save_generated_image(
+    app: AppState<'_>,
+    id: Uuid,
+    message: Uuid,
+    path: PathBuf,
+) -> Reply<()> {
+    reply(
+        async {
+            let image = app.store.inspect(|data| {
+                let row = fetch_thread(data, id)?
+                    .messages
+                    .iter()
+                    .find(|row| {
+                        row.id == message
+                            && row.role == Role::Assistant
+                            && row.image_generation.is_some()
+                    })
+                    .context("This image is no longer in the conversation.")?;
+                row.attachments
+                    .first()
+                    .cloned()
+                    .context("The conversation has no saved image.")
+            })?;
+            tauri::async_runtime::spawn_blocking(move || images::save(&image, &path)).await?
+        }
+        .await,
+    )
+}
+
 #[tauri::command]
 async fn send_message(app: AppState<'_>, window: AppHandle, prompt: Prompt) -> Reply<()> {
     reply(run_user_turn(&app, window, prompt.thread, TurnInput::New(prompt)).await)
@@ -1436,7 +1538,9 @@ async fn run_user_turn(
             thread
                 .messages
                 .last()
-                .filter(|last| last.id == message && last.role == Role::User)
+                .filter(|last| {
+                    last.id == message && last.role == Role::User && last.image_generation.is_none()
+                })
                 .cloned()
                 .context("This branch has already moved on from that message.")?
         }
@@ -1454,26 +1558,7 @@ async fn run_user_turn(
     let thread = if new_message {
         app.store.change(|data| {
             let thread = thread_mut(data, id)?;
-            if thread.messages.is_empty() && thread.title == "New conversation" {
-                let title = message
-                    .text
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .or_else(|| message.attachments.first().map(|file| file.name.as_str()))
-                    .or_else(|| {
-                        message
-                            .resources
-                            .first()
-                            .map(|resource| resource.name.as_str())
-                    })
-                    .unwrap_or("New conversation")
-                    .trim();
-                thread.title = title.chars().take(58).collect();
-                if title.chars().count() > 58 {
-                    thread.title.push('…');
-                }
-            }
-            thread.messages.push(message.clone());
+            thread.append_user_message(message.clone());
             Ok(thread.clone())
         })?
     } else {
@@ -1601,6 +1686,8 @@ pub fn run() {
             review_changes,
             add_worktree,
             send_message,
+            generate_image,
+            save_generated_image,
             reply_in_branch,
             stop_turn,
             resolve_approval

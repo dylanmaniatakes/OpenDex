@@ -62,6 +62,14 @@ For my self-hosted SearXNG instance, I enter its search URL, such as `https://se
 
 I turn on **Web search** in the composer for each conversation where I want it. The approval prompt shows the query or page URL before OpenDex sends it. **Custom → Search and fetch web pages** controls when I’m asked. The conversation keeps the titles, URLs, and excerpts returned by the service, and I can open those sources in my browser.
 
+## Image generation
+
+I can click **Generate image** in either composer and choose a saved OpenAI API or OpenAI-compatible connection with an Images API. I enter the image model ID, prompt, and any size or quality settings my endpoint accepts. I can keep a different provider and model for the rest of the conversation. [OpenAI Images API](https://learn.chatgpt.com/api/reference/resources/images/methods/generate)
+
+I see the generated image in the conversation and use **Save image** to export the original bytes. I can reopen the image prompt and generate another variation. Ordinary chat turns keep using the chat model I selected. I can attach a saved image if I want that model to analyze it.
+
+OpenDex can read inline Base64 images and image URLs on the same origin as the configured API. For a compatible gateway that requires an explicit Base64 response setting, I use **Request Base64 output** in the image form.
+
 ## Appearance and data
 
 I default to dark mode. Under **Appearance**, I can change the theme, accent, typeface, text scale, spacing, widths, corner radius, and animation preference.
@@ -70,7 +78,7 @@ The app saves project links, settings, conversations, and attachments in a local
 
 ### Encrypted settings backup
 
-In **Settings → Backups**, I can export my provider connections and pinned models, MCP and web search configuration, permission profile, appearance, global instructions, and project links. The archive includes API keys and MCP bearer keys I saved in OpenDex. I protect it with a passphrase and keep that passphrase so I can restore the file later. The archive uses the [age file format](https://age-encryption.org/v1).
+In **Settings → Backups**, I can export my provider connections and pinned models, MCP and web search configuration, image preferences, permission profile, appearance, global instructions, and project links. The archive includes API keys and MCP bearer keys I saved in OpenDex. I protect it with a passphrase and keep that passphrase so I can restore the file later. The archive uses the [age file format](https://age-encryption.org/v1).
 
 To restore, I open the backup and enter its passphrase. I review the connections and permission profile and can choose a new folder for each project before applying the settings. Restoration replaces the saved settings and puts the keys in the destination computer’s credential store. My existing conversations and project links stay in place. The backup carries project links without copying their files or conversation history.
 
@@ -106,6 +114,8 @@ I tested selecting several attachments in Model Chat, removing one, and verifyin
 
 I tested SearXNG searches and Ollama page retrieval in the macOS app with local fixtures. I verified that declining a search kept it from reaching the service, that the source link opened in my browser, and that the Read only profile kept web tools out of the model request.
 
+I tested image generation in both modes with a local Images API fixture. I verified inline Base64 and same-origin URL results, exported a byte-for-byte copy, and confirmed that a regular follow-up still used the original text model. I also stopped a pending generation and reopened its prompt.
+
 ### Source layout
 
 - `src/providers` contains inventory discovery, API payloads, and streaming decoders.
@@ -114,12 +124,13 @@ I tested SearXNG searches and Ollama page retrieval in the macOS app with local 
 - `src/agent.rs` contains project file tools, command scoping, and Git operations.
 - `src/mcp.rs` contains the JSON-RPC connection and tool operations.
 - `src/web.rs` sends search and page requests to the configured service and normalizes the sources.
+- `src/images.rs` handles image requests, raster input detection, and file export.
 - `src/codex.rs` connects to the optional Codex app server.
 - `src/desktop.rs` coordinates turns, approval prompts, and desktop commands.
 - `ui` contains the desktop screens, appearance controls, and Markdown display.
 
 ## Preview scope
 
-This is my first local preview. My priorities are provider freedom, usable MCP settings, project-based agent work, and transparent permissions. I still have work to do on voice, generated media, computer-use tools, automations, shared/cloud history, MCP subscriptions and media-rich prompts, and platform packaging. I plan to share the source after I’ve verified the workflows I use most often.
+This is my first local preview. My priorities are provider freedom, usable MCP settings, project-based agent work, and transparent permissions. I still have work to do on voice, image editing, computer-use tools, automations, shared/cloud history, MCP subscriptions and media-rich prompts, and platform packaging. I plan to share the source after I’ve verified the workflows I use most often.
 
 I’m making OpenDex available under the [MIT License](LICENSE).

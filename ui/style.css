@@ -356,6 +356,8 @@ input[type="range"], input[type="checkbox"] { accent-color: var(--accent); }
 }
 
 .preview-image { display: block; margin-top: 7px; max-width: min(380px, 100%); max-height: 260px; border-radius: min(var(--radius), 9px); object-fit: contain; }
+.preview-image.generated-image { max-width: min(650px, 100%); max-height: 580px; }
+.save-image { margin-top: 8px; }
 .web-sources { display: grid; gap: 10px; padding: 0 12px 12px; }
 .web-sources p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .web-source { display: grid; gap: 4px; border-top: 1px solid var(--line); padding-top: 10px; min-width: 0; }

@@ -1,7 +1,7 @@
 //! Encrypted, versioned settings archives. Account sessions remain owned by their provider.
 
 use crate::{
-    agent,
+    agent, images,
     state::{
         Appearance, Data, McpScope, Permissions, Profile, Project, Provider, ProviderKind, Server,
         Store, Transport, delete_secret, read_secret, write_secret,
@@ -52,6 +52,8 @@ pub struct Archive {
     servers: Vec<Connection<Server>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web_search: Option<web::Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_generation: Option<images::Config>,
     projects: Vec<Project>,
     permissions: Permissions,
     appearance: Appearance,
@@ -73,6 +75,7 @@ pub struct Preview {
     pub providers: Vec<String>,
     pub mcp_servers: Vec<String>,
     pub web_search: Option<&'static str>,
+    pub image_model: Option<String>,
     pub local_servers: Vec<String>,
     pub projects: Vec<ProjectPreview>,
     pub has_chatgpt_connection: bool,
@@ -127,6 +130,7 @@ impl Archive {
             providers,
             servers,
             web_search: data.web_search.clone(),
+            image_generation: data.image_generation.clone(),
             projects: data.projects.clone(),
             permissions: data.permissions.clone(),
             appearance: data.appearance.clone(),
@@ -165,6 +169,10 @@ impl Archive {
         if let Some(search) = &self.web_search {
             search.resolve(self.providers.iter().map(|entry| &entry.settings))?;
         }
+        if let Some(config) = &mut self.image_generation {
+            config.validate()?;
+            config.resolve(self.providers.iter().map(|entry| &entry.settings))?;
+        }
         for server in &mut self.servers {
             server.settings.validate()?;
             ensure!(
@@ -194,6 +202,10 @@ impl Archive {
         Preview {
             checksum,
             web_search: self.web_search.as_ref().map(web::Config::name),
+            image_model: self
+                .image_generation
+                .as_ref()
+                .map(|config| config.model.clone()),
             providers: self
                 .providers
                 .iter()
@@ -294,6 +306,7 @@ impl Archive {
             .map(|entry| entry.settings)
             .collect();
         data.set_web_search(self.web_search);
+        data.image_generation = self.image_generation;
         data.appearance = self.appearance;
         data.permissions = self.permissions;
         data.instructions = self.instructions;

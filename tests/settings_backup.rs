@@ -1,5 +1,5 @@
 use opendex::{
-    backup,
+    backup, images,
     state::{McpScope, Message, Project, Provider, ProviderKind, Role, Rule, Store, Thread},
     web::Config,
 };
@@ -21,7 +21,15 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     source
         .change(|data| {
             data.providers[0].name = "Backup endpoint".into();
+            data.providers[0].kind = ProviderKind::OpenAiCompatible;
             data.providers[0].models.push("pinned-model".into());
+            data.image_generation = Some(images::Config {
+                provider: data.providers[0].id,
+                model: "image-fixture".into(),
+                size: Some("1024x1024".into()),
+                quality: Some("medium".into()),
+                request_base64: false,
+            });
             data.providers.push(Provider {
                 name: "Login metadata".into(),
                 kind: ProviderKind::ChatGptAccount,
@@ -81,6 +89,7 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     assert!(preview.has_chatgpt_connection);
     assert_eq!(preview.mcp_servers, ["MCP fixture"]);
     assert_eq!(preview.web_search, Some("SearXNG"));
+    assert_eq!(preview.image_model.as_deref(), Some("image-fixture"));
     assert!(!preview.projects[0].available);
     assert!(destination.snapshot().instructions.is_empty());
     let mapped = folder.path().join("mapped");
@@ -106,6 +115,10 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     );
     assert_eq!(restored.appearance.theme, "light");
     assert_eq!(restored.web_search, source.snapshot().web_search);
+    assert_eq!(
+        restored.image_generation,
+        source.snapshot().image_generation
+    );
     assert_eq!(restored.permissions.web, Rule::Allow);
     assert_eq!(restored.instructions, "Archive fixture instructions");
 

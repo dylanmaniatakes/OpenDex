@@ -1,5 +1,5 @@
 //! Persistent app data. Credentials stay in the system credential store.
-use crate::web;
+use crate::{images, web};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -492,6 +492,8 @@ pub struct Message {
     pub provider: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation: Option<images::Config>,
     #[serde(
         default,
         alias = "attachment",
@@ -552,6 +554,7 @@ impl Message {
             tool_label: None,
             provider: None,
             model: None,
+            image_generation: None,
             attachments: vec![],
             resources: vec![],
         }
@@ -669,6 +672,29 @@ pub struct Thread {
 }
 
 impl Thread {
+    pub(crate) fn append_user_message(&mut self, message: Message) {
+        if self.messages.is_empty() && self.title == "New conversation" {
+            let title = message
+                .text
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .or_else(|| message.attachments.first().map(|file| file.name.as_str()))
+                .or_else(|| {
+                    message
+                        .resources
+                        .first()
+                        .map(|resource| resource.name.as_str())
+                })
+                .unwrap_or("New conversation")
+                .trim();
+            self.title = title.chars().take(58).collect();
+            if title.chars().count() > 58 {
+                self.title.push('…');
+            }
+        }
+        self.messages.push(message);
+    }
+
     pub fn branch_at(&self, message: Uuid, action: BranchAction) -> Result<Self> {
         let position = self
             .messages
@@ -689,11 +715,17 @@ impl Thread {
                     .iter()
                     .rposition(|item| item.role == Role::User)
                     .context("This response has no user message to retry.")?;
+                ensure!(
+                    self.messages[end].image_generation.is_none(),
+                    "Use Generate image again for this prompt."
+                );
                 "Retry"
             }
             BranchAction::Edit { .. } => {
                 ensure!(
-                    self.mode == Mode::Chat && selected.role == Role::User,
+                    self.mode == Mode::Chat
+                        && selected.role == Role::User
+                        && selected.image_generation.is_none(),
                     "Choose a user message in Model Chat to edit."
                 );
                 "Edited"
@@ -731,6 +763,8 @@ pub struct Data {
     pub servers: Vec<Server>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<web::Config>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_generation: Option<images::Config>,
     pub threads: Vec<Thread>,
     pub projects: Vec<Project>,
     pub permissions: Permissions,
@@ -746,6 +780,7 @@ impl Default for Data {
             providers: vec![Provider::local()],
             servers: vec![],
             web_search: None,
+            image_generation: None,
             threads: vec![],
             projects: vec![],
             permissions: Permissions::default(),
@@ -823,7 +858,7 @@ pub(crate) fn open_lock_file(path: &Path) -> std::io::Result<fs::File> {
 /// A small JSON store written through a same-directory temp file. Mutations become
 /// visible to readers only after the replacement has succeeded.
 pub struct Store {
-    _lock: fs::File,
+    lock: fs::File,
     path: PathBuf,
     data: Mutex<Data>,
 }
@@ -850,7 +885,7 @@ impl Store {
             Self::write(&path, &data)?;
         }
         Ok(Self {
-            _lock: lock,
+            lock,
             path,
             data: Mutex::new(data),
         })
@@ -902,6 +937,13 @@ impl Store {
     }
 }
 
+impl Drop for Store {
+    fn drop(&mut self) {
+        // A concurrent subprocess can briefly inherit the descriptor until exec.
+        let _ = self.lock.unlock();
+    }
+}
+
 /// Bind stored keys to the original endpoint so editing a URL never forwards an old key.
 fn credential(id: Uuid, target: &str) -> Result<keyring::Entry> {
     Ok(keyring::Entry::new(
@@ -938,5 +980,23 @@ pub fn delete_secret(id: Uuid, target: &str) -> Result<()> {
         Err(error) => {
             Err(error).context("Could not remove the key from the system credential store.")
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_a_workspace_releases_the_lock_with_an_inherited_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let inherited = store.lock.try_clone().unwrap();
+        assert!(Store::open(directory.path()).is_err());
+        drop(store);
+        let reopened = Store::open(directory.path()).unwrap();
+        drop(inherited);
+        assert!(Store::open(directory.path()).is_err());
+        drop(reopened);
     }
 }

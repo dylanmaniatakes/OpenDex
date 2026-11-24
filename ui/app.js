@@ -510,13 +510,19 @@ function messageActions(thread, message, lastVisible) {
   const user = message.role === 'user';
   const canReply = user && thread.parent_thread && thread.messages.at(-1)?.id === message.id;
   const action = (label, glyph, handler) => button(label, handler, { glyph, onlyIcon: true, style: 'icon-button small' });
+  const branch = () => queueNavigation(() => branchConversation(thread, message, { kind: 'continue' }));
+  if (message.image_generation) {
+    return el('div', { class: 'message-actions' },
+      user && action('Generate image again', 'refresh', () => imagePrompt(thread, message.text, message.image_generation)),
+      action('Branch from here', 'branch', branch));
+  }
   return el('div', { class: 'message-actions' },
     user && thread.mode === 'chat' && action('Edit message', 'edit', () => editMessage(thread, message)),
     !user && action('Copy response', 'copy', () => copy(message.text)),
     thread.mode === 'chat' && (!user || lastVisible) && (canReply
       ? action('Generate reply', 'refresh', transient(() => replyToBranch(thread)))
       : action('Retry reply', 'refresh', () => queueNavigation(() => branchConversation(thread, message, { kind: 'retry' })))),
-    action('Branch from here', 'branch', () => queueNavigation(() => branchConversation(thread, message, { kind: 'continue' }))),
+    action('Branch from here', 'branch', branch),
   );
 }
 
@@ -550,6 +556,7 @@ function messageCard(thread, message, lastVisible) {
   }
   if (!message.text && !message.attachments?.length && !message.resources?.length) return null;
   const body = user ? el('div', { class: 'user-text' }, message.text) : markdown(message.text, copy);
+  const imageOutput = !user && message.image_generation;
   const meta = user ? null : el('div', { class: 'assistant-meta' },
     el('span', { class: 'brand-symbol tiny', 'aria-hidden': 'true' }),
     el('span', {}, message.model ?? 'Assistant'),
@@ -558,15 +565,76 @@ function messageCard(thread, message, lastVisible) {
     el('div', { class: 'message-content' }, body,
       message.attachments?.length > 0 && el('div', { class: 'message-attachments' },
         message.attachments.map((file) => el('div', {},
-          el('div', { class: 'chip file-chip' }, icon('note', 15), file.name),
+          !imageOutput && el('div', { class: 'chip file-chip' }, icon('note', 15), file.name),
           file.media_type?.startsWith('image/') && el('img', {
-            class: 'preview-image', src: 'data:' + file.media_type + ';base64,' + file.text,
-            alt: file.name, loading: 'lazy',
-          })))),
+            class: 'preview-image' + (imageOutput ? ' generated-image' : ''), src: 'data:' + file.media_type + ';base64,' + file.text,
+            alt: imageOutput ? 'Generated image' : file.name, loading: 'lazy',
+          }),
+          imageOutput && button('Save image', transient(() => saveImage(thread, message, file)),
+            { glyph: 'download', style: 'button save-image' })))),
       message.resources?.map((resource) => el('details', { class: 'tool-result message-resource' },
         el('summary', {}, icon('plug', 15), resource.name, el('small', {}, ' · ' + resource.source)),
         el('pre', {}, resource.text)))),
     messageActions(thread, message, lastVisible));
+}
+
+async function saveImage(thread, message, file) {
+  const extension = file.name.split('.').at(-1);
+  const path = await io.save({ title: 'Save generated image', defaultPath: file.name,
+    filters: [{ name: 'Image', extensions: [extension] }] });
+  if (!path) return;
+  await invoke('save_generated_image', { id: thread.id, message: message.id, path });
+  toast('Image saved.');
+}
+
+function imagePrompt(thread, text, preferred = data.image_generation) {
+  if (!thread || turns.has(thread.id)) return;
+  const connections = data.providers.filter((provider) => ['open_ai', 'open_ai_compatible'].includes(provider.kind));
+  if (!connections.length) {
+    showDetails('Generate image', el('div', { class: 'details-form' },
+      el('p', { class: 'muted' }, 'Add an OpenAI API or OpenAI-compatible connection with an image generation endpoint.'),
+      button('Open provider settings', () => { $('details').close(); settings.open('providers'); }, { glyph: 'settings' })));
+    return;
+  }
+  const initial = connections.find((item) => item.id === preferred?.provider)
+    ?? connections.find((item) => item.id === thread.provider_id) ?? connections[0];
+  const prompt = el('textarea', { rows: 6, required: true, maxlength: 32000 }, text);
+  const model = el('input', { type: 'text', required: true, maxlength: 300, spellcheck: 'false', value: preferred?.model ?? '' });
+  const size = el('input', { type: 'text', value: preferred?.size ?? '', placeholder: 'Provider default', maxlength: 20 });
+  const quality = options([['', 'Provider default'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'],
+    ['xhigh', 'Extra high'], ['max', 'Maximum'], ['standard', 'Standard'], ['hd', 'HD']], preferred?.quality === 'auto' ? '' : preferred?.quality);
+  let requestBase64 = preferred?.request_base64 ?? false;
+  const compatibility = el('div', { hidden: initial.kind !== 'open_ai_compatible' },
+    check('Request Base64 output', requestBase64, (value) => { requestBase64 = value; }));
+  const connectionAddress = el('span', { class: 'field-note' }, initial.endpoint);
+  const provider = options(connections.map((item) => [item.id, item.name]), initial.id, (id) => {
+    const connection = connections.find((item) => item.id === id);
+    compatibility.hidden = connection.kind !== 'open_ai_compatible';
+    connectionAddress.textContent = connection.endpoint;
+  });
+  const submit = el('button', { type: 'submit', class: 'button primary' }, icon('image', 16), 'Generate');
+  const form = el('form', { class: 'details-form', onsubmit: transient(async (event) => {
+    event.preventDefault();
+    if (turns.has(thread.id) || data.threads.every((item) => item.id !== thread.id)) return;
+    const config = { provider: provider.value, model: model.value, size: size.value || null,
+      quality: quality.value || null, request_base64: !compatibility.hidden && requestBase64 };
+    const draft = draftOf(thread.id);
+    const pending = { text: prompt.value, config };
+    draft.pendingImage = pending;
+    $('details').close();
+    const saved = await generateReply(thread, 'generate_image', { prompt: { thread: thread.id, ...pending } }, undefined, 'Generating image…');
+    if (saved && draft.pendingImage === pending) delete draft.pendingImage;
+  }) },
+  field('Image prompt', prompt),
+  el('div', { class: 'form-grid' },
+    el('div', {}, field('Image provider', provider), connectionAddress),
+    field('Image model ID', model),
+    field('Size', size, 'Enter dimensions such as 1024x1024.'),
+    field('Quality', quality)),
+  compatibility,
+  el('div', { class: 'form-actions right' }, button('Cancel', () => $('details').close()), submit));
+  showDetails('Generate image', form);
+  prompt.focus();
 }
 
 function nearBottom() {
@@ -725,6 +793,7 @@ function composer(thread) {
   $('prompt').disabled = busy || !thread;
   $('attach').disabled = busy || !thread || draft.loadingFiles;
   $('mcp-context').disabled = busy || !thread;
+  $('generate-image').disabled = busy || !thread;
   const webSearch = $('web-search');
   webSearch.disabled = busy || !thread;
   webSearch.setAttribute('aria-pressed', String(Boolean(thread?.web_enabled && data.web_search && !webDenied())));
@@ -758,15 +827,15 @@ function hasSelectedModel(thread) {
   return false;
 }
 
-async function generateReply(thread, command, args, restoreDraft) {
+async function generateReply(thread, command, args, restoreDraft, notice = '') {
   if (turns.has(thread.id)) return;
   const draft = draftOf(thread.id);
   draft.error = null;
   draft.notice = null;
-  turns.set(thread.id, { stream: '', notice: '', approval: null, accepted: false });
+  turns.set(thread.id, { stream: '', notice, approval: null, accepted: false });
   render();
   try {
-    await invoke(command, args);
+    return await invoke(command, args);
   } catch (error) {
     draft.error = String(error);
     if (!turns.get(thread.id)?.accepted) restoreDraft?.();
@@ -782,7 +851,7 @@ async function generateReply(thread, command, args, restoreDraft) {
 async function replyToBranch(thread) {
   if (turns.has(thread.id) || !hasSelectedModel(thread)) return;
   const prompt = thread.messages.at(-1);
-  if (prompt?.role !== 'user') return;
+  if (prompt?.role !== 'user' || prompt.image_generation) return;
   await generateReply(thread, 'reply_in_branch', { id: thread.id, message: prompt.id });
 }
 
@@ -870,6 +939,13 @@ function bind() {
   $('mcp-context').replaceChildren(icon('plug', 17));
   $('mcp-context').addEventListener('click', openMcpContext);
   $('web-search').replaceChildren(icon('search', 17));
+  $('generate-image').replaceChildren(icon('image', 17));
+  $('generate-image').addEventListener('click', () => {
+    const thread = current();
+    if (!thread) return;
+    const draft = draftOf(thread.id);
+    imagePrompt(thread, draft.pendingImage?.text ?? draft.text, draft.pendingImage?.config);
+  });
   $('web-search').addEventListener('click', transient(async () => {
     const thread = current();
     if (!thread || live()) return;
