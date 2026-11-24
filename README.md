@@ -96,7 +96,7 @@ The archive preserves any legacy Anthropic session bytes from the removed protot
 
 I use Rust for the provider adapters, state, MCP, and permission checks. Tauri provides the desktop window and native dialogs, with a small HTML/CSS/JavaScript frontend and no Node build step. The workspace supports **Rust 1.95** and uses the checked-in dependency lockfile.
 
-On macOS I use the Xcode command-line tools and Python 3 for bundle packaging.
+The core provider, state, MCP, and credential logic builds without the desktop feature, so I keep that check in my normal test pass. `scripts/check.sh` runs the frontend asset test, Rust formatting, Clippy, the desktop test suite, and the no-desktop library test suite in one command.
 
 ```sh
 cargo run --locked
@@ -106,10 +106,10 @@ bash scripts/bundle-macos.sh
 The bundling script writes `dist/OpenDex.app` and applies a local ad-hoc signature. Finder can launch the preview on the Mac that built it. Developer ID signing and notarization are release tasks. The Rust and Tauri code leave room for Windows and Linux builds. I have tested the desktop on Apple Silicon macOS and scoped command isolation is implemented for macOS.
 
 ```sh
-node --test tests/*.mjs
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+bash scripts/check.sh
+
+# Optional installed-CLI checks. The Codex keyring check also uses disposable
+# native-Keychain credentials and deletes them afterward.
 cargo test --locked --test provider_transports installed_codex_server -- --ignored
 cargo test --locked --test provider_transports installed_codex_keyring_format -- --ignored
 cargo test --locked --test claude_transport installed_claude -- --ignored

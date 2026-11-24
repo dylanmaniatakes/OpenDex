@@ -728,6 +728,7 @@ pub struct Thread {
 }
 
 impl Thread {
+    #[cfg(feature = "desktop")]
     pub(crate) fn append_user_message(&mut self, message: Message) {
         if self.messages.is_empty() && self.title == "New conversation" {
             let title = message
