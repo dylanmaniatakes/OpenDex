@@ -162,11 +162,16 @@ impl Connection {
             Transport::Stdio => {
                 let mut process = Command::new(&server.address);
                 process.env_clear().env("PATH", process_path());
-                for variable in &server.env {
-                    let value = std::env::var_os(variable).with_context(|| {
-                        format!("MCP environment variable {variable} is unavailable.")
-                    })?;
-                    process.env(variable, value);
+                for entry in &server.env {
+                    let (name, fixed) = crate::state::split_env_assignment(entry)
+                        .context("Invalid MCP environment setup.")?;
+                    let value = match fixed {
+                        Some(value) => value.into(),
+                        None => std::env::var_os(name).with_context(|| {
+                            format!("MCP environment variable {name} is unavailable.")
+                        })?,
+                    };
+                    process.env(name, value);
                 }
                 process
                     .args(&server.args)

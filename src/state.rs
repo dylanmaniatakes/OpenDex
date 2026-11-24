@@ -222,6 +222,19 @@ pub fn validate_env(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// A stdio server environment entry is either `NAME`, which passes the
+/// OpenDex process value through, or `NAME=VALUE`, which sets a fixed value.
+pub fn split_env_assignment(entry: &str) -> Result<(&str, Option<&str>)> {
+    let Some((name, value)) = entry.split_once('=') else {
+        return Ok((entry, None));
+    };
+    ensure!(
+        !value.contains('\0'),
+        "Environment value for {name} contains a null byte."
+    );
+    Ok((name, Some(value)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
@@ -310,8 +323,14 @@ impl Server {
                 }
             }
             Transport::Stdio => {
-                for variable in &self.env {
-                    validate_env(variable)?;
+                let mut seen = std::collections::HashSet::new();
+                for entry in &self.env {
+                    let (name, _) = split_env_assignment(entry)?;
+                    validate_env(name)?;
+                    ensure!(
+                        seen.insert(name.to_owned()),
+                        "Environment variable {name} is configured more than once."
+                    );
                 }
                 ensure!(
                     self.args.iter().all(|arg| !arg.contains('\0')),
@@ -1084,6 +1103,32 @@ mod tests {
         drop(inherited);
         assert!(Store::open(directory.path()).is_err());
         drop(reopened);
+    }
+
+    #[test]
+    fn stdio_env_entries_accept_names_and_fixed_values() {
+        let mut server = Server {
+            id: Uuid::new_v4(),
+            name: "Fixture".into(),
+            transport: Transport::Stdio,
+            address: "/path/to/server".into(),
+            args: vec![],
+            env: vec!["PASSTHROUGH".into(), "FIXED=value".into(), "EMPTY=".into()],
+            has_secret: false,
+            secret_ref: None,
+            enabled: true,
+            blocked_tools: vec![],
+            tool_permission: None,
+            tool_permissions: Default::default(),
+            current_protocol: false,
+            headers: Vec::new(),
+        };
+        server.validate().unwrap();
+        assert!(split_env_assignment("FIXED=value").unwrap().1 == Some("value"));
+        server.env.push("PASSTHROUGH".into());
+        assert!(server.validate().is_err());
+        server.env[3] = "BAD-NAME=1".into();
+        assert!(server.validate().is_err());
     }
 
     #[test]

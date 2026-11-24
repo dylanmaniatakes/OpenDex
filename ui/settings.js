@@ -406,7 +406,7 @@ export function settingsPanel(api) {
     const address = input(server.address, { required: true, spellcheck: 'false' });
     const secret = input('', { type: 'password', autocomplete: 'off', placeholder: server.has_secret ? 'Saved bearer key' : 'Optional' });
     const args = textarea(JSON.stringify(server.args), { rows: 3, spellcheck: 'false', placeholder: '["--option", "value"]' });
-    const env = textarea(server.env.join('\n'), { rows: 2, spellcheck: 'false', placeholder: 'SERVER_API_KEY' });
+    const env = textarea(server.env.join('\n'), { rows: 3, spellcheck: 'false', placeholder: 'SERVER_API_KEY\nGHIDRA_INSTALL_DIR=/usr/local/ghidra' });
     const headers = textarea((server.headers ?? []).map(([name, variable]) => name + '=' + variable).join('\n'), { rows: 2, spellcheck: 'false', placeholder: 'X-Organization=MY_ORG' });
     const transportFields = el('div', { class: 'form-grid wide' });
     let transport = server.transport;
@@ -424,7 +424,7 @@ export function settingsPanel(api) {
       transportFields.replaceChildren(
         field(transport === 'stdio' ? 'Executable' : 'Streamable HTTP URL', address),
         ...(transport === 'stdio'
-          ? [field('Arguments as JSON', args), field('Environment variable names', env, 'Values are read from the OpenDex process environment.')]
+          ? [field('Arguments as JSON', args), field('Environment variables', env, 'One per line. NAME passes the OpenDex value through; NAME=VALUE sets a fixed value.')]
           : [field('Bearer key', secret), field('Headers from environment', headers, 'One header per line. Use HEADER_NAME=ENVIRONMENT_VARIABLE.'), ...(server.has_secret
             ? [check('Forget saved key', forget, (value) => { forget = value; })] : [])]),
       );

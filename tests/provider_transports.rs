@@ -515,6 +515,39 @@ fn server(address: String, current_protocol: bool) -> Server {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn local_mcp_stdio_sends_fixed_and_passed_environment() {
+    let script = r#"
+import json, os, sys
+assert os.environ['OPENDEX_MCP_FIXED'] == 'fixture-value'
+assert os.pathsep in os.environ['PATH']
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request:
+        continue
+    if request['method'] == 'initialize':
+        result = {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "env", "version": "1"}}
+    elif request['method'] == 'tools/list':
+        result = {"tools": [{"name": "echo", "description": "Reads its environment", "inputSchema": {"type": "object"}}]}
+    elif request['method'] == 'notifications/initialized':
+        continue
+    else:
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": request['id'], "result": result}), flush=True)
+"#;
+    let mut local = server("python3".into(), false);
+    local.transport = Transport::Stdio;
+    local.args = vec!["-u".into(), "-c".into(), script.into()];
+    local.env = vec!["OPENDEX_MCP_FIXED=fixture-value".into(), "PATH".into()];
+    local.validate().unwrap();
+    let mut session = Connection::connect(&providers::client().unwrap(), &local, None)
+        .await
+        .unwrap();
+    assert_eq!(session.tools().await.unwrap()[0].name, "echo");
+    session.close().await;
+}
+
 #[tokio::test]
 async fn legacy_mcp_http_keeps_session_between_initialize_list_call_and_delete() {
     let fixture = Fixture::new(5, |request| {
