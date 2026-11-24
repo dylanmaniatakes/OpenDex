@@ -18,6 +18,8 @@ In either composer, I can attach several files at once or drop them onto the mes
 
 In **Model Chat**, I can edit a user message or retry a reply. Both actions create a branch using the history through the original prompt, with its saved attachments. I can also use **Branch from here** in either mode to continue through a selected message. I can return to the source under **Conversation settings → Open original conversation**. Code Agent branches use the selected project folder, and I can create a separate worktree for isolated changes.
 
+I run one OpenDex at a time. The app locks its data folder, so a second launch exits quietly on other systems, and on macOS it brings the running copy to the front instead of opening more windows.
+
 ## Connections
 
 | Adapter | Default base URL | Authentication |
