@@ -70,6 +70,7 @@ export function settingsPanel(api) {
   let accountBusy = false;
   let authUrl;
   let catalogSearch = '';
+  // Preserve the access mode a user chooses while they finish filling in the connection.
   const anthropicAuthDrafts = new Map();
 
   function open(section = 'providers', id = null) {
@@ -243,7 +244,7 @@ export function settingsPanel(api) {
         status.textContent = String(error);
       });
       actions.append(
-        button(!connected ? 'Connect account' : 'Refresh session', async () => {
+        button(!connected ? 'Connect account' : 'Reconnect account', async () => {
           await run(status, status, async () => {
             status.textContent = 'Waiting for browser sign-in…';
             try {

@@ -1,5 +1,9 @@
 //! Anthropic account sign-in. This uses the provider's OAuth flow and stores
 //! its refresh token in the system credential store.
+//!
+//! OpenDex only asks Anthropic for the inference and profile scopes. Account
+//! sessions therefore use the official endpoint because the token was granted
+//! by Anthropic and cannot be pointed at another service.
 use crate::state::{
     AnthropicAuth, Provider, ProviderKind, delete_secret, read_secret, write_secret,
 };
@@ -25,6 +29,8 @@ const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const SCOPES: &str = "user:inference user:profile";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 const TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Anthropic returns the session credentials and refresh token from OAuth.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
