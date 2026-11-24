@@ -511,6 +511,7 @@ fn server(address: String, current_protocol: bool) -> Server {
         tool_permission: None,
         tool_permissions: Default::default(),
         current_protocol,
+        headers: Vec::new(),
     }
 }
 
@@ -1074,4 +1075,24 @@ async fn installed_codex_keyring_format_matches_portable_entry() {
         entry.delete_credential().unwrap();
         assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
     }
+}
+
+#[tokio::test]
+async fn current_mcp_http_servers_send_environment_backed_headers() {
+    let fixture = Fixture::new(1, |request| {
+        assert!(request.headers.contains("x-mcp-org:"));
+        (
+            "application/json",
+            String::new(),
+            json!({"jsonrpc":"2.0","id":request.body["id"],"result":{"tools":[]}}).to_string(),
+        )
+    });
+    let mut connection = server(fixture.endpoint.clone(), true);
+    connection.headers = vec![("x-mcp-org".into(), "PATH".into())];
+    let mut session = Connection::connect(&providers::client().unwrap(), &connection, None)
+        .await
+        .unwrap();
+    assert!(session.tools().await.unwrap().is_empty());
+    session.close().await;
+    fixture.finish();
 }

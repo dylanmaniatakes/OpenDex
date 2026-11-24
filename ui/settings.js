@@ -390,6 +390,7 @@ export function settingsPanel(api) {
     const secret = input('', { type: 'password', autocomplete: 'off', placeholder: server.has_secret ? 'Saved bearer key' : 'Optional' });
     const args = textarea(JSON.stringify(server.args), { rows: 3, spellcheck: 'false', placeholder: '["--option", "value"]' });
     const env = textarea(server.env.join('\n'), { rows: 2, spellcheck: 'false', placeholder: 'SERVER_API_KEY' });
+    const headers = textarea((server.headers ?? []).map(([name, variable]) => name + '=' + variable).join('\n'), { rows: 2, spellcheck: 'false', placeholder: 'X-Organization=MY_ORG' });
     const transportFields = el('div', { class: 'form-grid wide' });
     let transport = server.transport;
     let enabled = server.enabled;
@@ -407,7 +408,7 @@ export function settingsPanel(api) {
         field(transport === 'stdio' ? 'Executable' : 'Streamable HTTP URL', address),
         ...(transport === 'stdio'
           ? [field('Arguments as JSON', args), field('Environment variable names', env, 'Values are read from the OpenDex process environment.')]
-          : [field('Bearer key', secret), ...(server.has_secret
+          : [field('Bearer key', secret), field('Headers from environment', headers, 'One header per line. Use HEADER_NAME=ENVIRONMENT_VARIABLE.'), ...(server.has_secret
             ? [check('Forget saved key', forget, (value) => { forget = value; })] : [])]),
       );
     }
@@ -456,6 +457,7 @@ export function settingsPanel(api) {
     form.addEventListener('submit', (event) => {
       event.preventDefault();
       let parsed;
+      let headerPairs;
       try { parsed = transport === 'stdio' ? JSON.parse(args.value || '[]') : []; }
       catch { status.textContent = 'Enter arguments as a JSON array of strings.'; return; }
       if (!Array.isArray(parsed) || parsed.some((arg) => typeof arg !== 'string')) {

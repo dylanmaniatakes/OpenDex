@@ -67,6 +67,7 @@ struct Streamable {
     url: reqwest::Url,
     secret: Option<String>,
     session: Option<header::HeaderValue>,
+    headers: Vec<(header::HeaderName, header::HeaderValue)>,
 }
 
 enum Channel {
@@ -192,6 +193,7 @@ impl Connection {
                 url: endpoint(&server.address)?,
                 secret: read_secret(server.credential_id(), &server.address, server.has_secret)?,
                 session: None,
+                headers: streamable_headers(server)?,
             })),
         };
         let mut connection = Self {
@@ -326,6 +328,9 @@ impl Connection {
                     }
                     if let Some(secret) = &http.secret {
                         post = post.bearer_auth(secret);
+                    }
+                    for (name, value) in &http.headers {
+                        post = post.header(name.clone(), value.clone());
                     }
                     if let Some(session) = &http.session {
                         post = post.header("Mcp-Session-Id", session);
@@ -618,4 +623,21 @@ impl Connection {
             let _ = timeout(Duration::from_secs(2), delete.send()).await;
         }
     }
+}
+
+fn streamable_headers(server: &Server) -> Result<Vec<(header::HeaderName, header::HeaderValue)>> {
+    server
+        .headers
+        .iter()
+        .map(|(name, variable)| {
+            let value = std::env::var(variable)
+                .with_context(|| format!("MCP environment variable {variable} is unavailable."))?;
+            let value = header::HeaderValue::from_str(&value).with_context(|| {
+                format!("MCP environment variable {variable} contains an invalid header value.")
+            })?;
+            let name = header::HeaderName::from_bytes(name.as_bytes())
+                .context("MCP header name is invalid.")?;
+            Ok((name, value))
+        })
+        .collect()
 }

@@ -50,7 +50,7 @@ On macOS I run scoped commands through Seatbelt. They can read approved project 
 
 ## MCP servers
 
-In **Settings → MCP Servers**, I can add a local stdio command or a Streamable HTTP URL. Local servers take a JSON array of arguments and a list of environment variable names. HTTP servers can use a bearer key. I can set tool approvals for a whole server, then use **Test & list tools** to set rules for individual tools. The strictest rule among the permission profile, server, and tool applies to model calls. A denied tool is hidden from the model.
+In **Settings → MCP Servers**, I can add a local stdio command or a Streamable HTTP URL. Local servers take a JSON array of arguments and a list of environment variable names. HTTP servers can use a bearer key and headers read from environment variables. I set each custom HTTP header as `HEADER_NAME=ENVIRONMENT_VARIABLE`, so I can add a gateway organization or routing header without storing another secret in OpenDex. I can set tool approvals for a whole server, then use **Test & list tools** to set rules for individual tools. The strictest rule among the permission profile, server, and tool applies to model calls. A denied tool is hidden from the model.
 
 In **Conversation settings → MCP servers**, I can use all enabled servers or select specific servers for that conversation. An empty selection keeps MCP servers out of that conversation. Branches inherit the selection.
 

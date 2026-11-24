@@ -253,6 +253,9 @@ pub struct Server {
     pub tool_permissions: BTreeMap<String, Rule>,
     #[serde(default)]
     pub current_protocol: bool,
+    /// HTTP header name paired with the environment variable that supplies its value.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
 }
 
 impl Server {
@@ -288,6 +291,23 @@ impl Server {
         match self.transport {
             Transport::Http => {
                 endpoint(&self.address)?;
+                self.env.clear();
+                let mut seen = std::collections::HashSet::new();
+                for (name, variable) in &self.headers {
+                    let name = validate_request_header(name)?;
+                    ensure!(
+                        !matches!(
+                            name.as_str(),
+                            "authorization" | "mcp-session-id" | "mcp-protocol-version"
+                        ),
+                        "Header {name} is managed by the MCP client or bearer key."
+                    );
+                    ensure!(
+                        seen.insert(name),
+                        "A request header is configured more than once."
+                    );
+                    validate_env(variable)?;
+                }
             }
             Transport::Stdio => {
                 for variable in &self.env {
@@ -297,6 +317,7 @@ impl Server {
                     self.args.iter().all(|arg| !arg.contains('\0')),
                     "An argument contains a null byte."
                 );
+                self.headers.clear();
             }
         }
         Ok(())
