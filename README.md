@@ -22,7 +22,7 @@ In **Model Chat**, I can edit a user message or retry a reply. Both actions crea
 | --- | --- | --- |
 | OpenAI API | `https://api.openai.com/v1` | OpenAI API key. Uses the Responses API. |
 | ChatGPT Account | Installed `codex` executable | Browser sign-in through Codex app-server. Uses eligible Codex models. |
-| Anthropic API | `https://api.anthropic.com/v1` | Anthropic Console key or Claude account sign-in. Uses the Messages API. |
+| Anthropic API | `https://api.anthropic.com/v1` | Anthropic Console key. Uses the Messages API. The account option is an unverified prototype. |
 | Google Gemini API | `https://generativelanguage.googleapis.com/v1beta` | Google AI Studio API key. Uses native Gemini streaming and function calling. |
 | Ollama Local | `http://127.0.0.1:11434/api` | Local Ollama normally accepts unauthenticated requests. |
 | Ollama Cloud | `https://ollama.com/api` | Ollama API key. |
@@ -34,9 +34,9 @@ For Gemini, I can discover models that support content generation, add model IDs
 
 For a ChatGPT account, I install the [Codex CLI](https://learn.chatgpt.com/docs/cli), add the **ChatGPT Account** adapter, and click **Connect account**. The Codex executable opens the official browser flow and manages its own credentials. OpenDex uses a dedicated Codex home so the connection is independent of my terminal setup. The browser flow and subscribed inference are still part of my live verification checklist. [Codex app-server authentication](https://learn.chatgpt.com/docs/app-server#auth-endpoints)
 
-I can use Anthropic two ways. A Console API key works with the standard Messages API. I can also select **Claude account** in the provider settings, save the connection, then use **Connect account** to open Anthropic’s sign-in page in my browser. That request asks only for Claude inference and profile access. OpenDex keeps the session token in the system credential store and refreshes it when it expires. To switch back to an API key, I first sign out of the account, then save my Console key. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+I use an Anthropic Console API key for Claude through the Messages API. The current **Claude account** option is an unverified prototype that uses direct OAuth and stores session tokens. I have identified that this design conflicts with Anthropic’s documented authentication rules for third-party applications, so I do not consider it ready for release. Anthropic documents an integration route where the user authenticates through an installed, unmodified Claude Code binary. I am evaluating that route for subscription support. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
 
-Token parsing checks cover refreshed access tokens, rotated refresh tokens, and retention of saved account details. The Anthropic browser sign-in, subscribed model discovery, token refresh, and inference still need live verification. Frontend checks cover saving provider values and signing out through the account controls.
+Token parsing checks cover refreshed access tokens, rotated refresh tokens, and retention of saved account details. Those checks validate the prototype’s local data handling. Live account sign-in and inference have not been verified.
 
 ## Code Agent and permissions
 
@@ -88,7 +88,7 @@ To restore, I open the backup and enter its passphrase. I review the connections
 
 My ChatGPT Account connection is included as a setting. I use **Connect account** on a new computer because Codex manages that session in its own credential store. I also set up any environment variables referenced by provider headers or local MCP servers on the new computer. [Codex credential storage](https://learn.chatgpt.com/docs/auth?surface=cli#credential-storage)
 
-My Anthropic account session is included too. It restores with the saved Anthropic endpoint and account mode, so I can reconnect with my current access token. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+The archive also includes any Anthropic session data saved by the account prototype. The credential transfer test covers those bytes, while the subscription integration still needs to move to the provider-documented authentication route described above.
 
 ## Build from source
 
