@@ -440,7 +440,7 @@ async function findModels(thread, provider) {
     const models = await invoke('discover_models', { id: provider.id });
     if (!models.length) { toast('Ollama is running and has no installed models. Add one in Ollama, then try again.', true); settings.open('providers', provider.id); return; }
     const list = el('div', { class: 'setup-model-list' }, models.map((id) => button(id, transient(async () => {
-      await invoke('save_provider', { value: { ...provider, models: [...provider.models, id] }, secret: null, forget: false });
+      await invoke('add_provider_models', { id: provider.id, models: [id] });
       await refresh();
       await setSelection(thread, provider.id, id);
       $('details').close();

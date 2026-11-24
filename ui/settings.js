@@ -345,7 +345,7 @@ export function settingsPanel(api) {
     const pinned = el('div', { class: 'pinned-models' }, provider.models.map((id) =>
       el('div', { class: 'chip' }, el('span', {}, id), button('Remove ' + id, async () => {
         try {
-          await api.invoke('save_provider', { value: { ...provider, models: provider.models.filter((item) => item !== id) }, secret: null, forget: false });
+          await api.invoke('remove_provider_model', { id: provider.id, model: id });
           await api.refresh(); render();
         } catch (error) { api.toast(String(error), true); }
       }, { glyph: 'close', onlyIcon: true, style: 'icon-button small' }))));

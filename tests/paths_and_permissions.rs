@@ -313,3 +313,55 @@ async fn git_review_sees_new_files_and_worktrees_start_from_head() {
         "working directory\n"
     );
 }
+
+#[test]
+fn concurrent_model_updates_preserve_connection_settings_and_other_models() {
+    let directory = tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open(directory.path()).unwrap());
+    let id = store.snapshot().providers[0].id;
+    store
+        .change(|data| {
+            data.providers[0].name = "Configured endpoint".into();
+            data.providers[0].headers = vec![("x-organization".into(), "ORG".into())];
+            data.add_provider_models(id, vec!["old-model".into()])?;
+            Ok(())
+        })
+        .unwrap();
+    let jobs: Vec<_> = ["first-model", "second-model", "old-model"]
+        .into_iter()
+        .map(|model| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store
+                    .change(|data| {
+                        if model == "old-model" {
+                            data.remove_provider_model(id, model)
+                        } else {
+                            data.add_provider_models(id, vec![model.into(), model.into()])
+                        }
+                    })
+                    .unwrap();
+            })
+        })
+        .collect();
+    for job in jobs {
+        job.join().unwrap();
+    }
+    let before = store.snapshot().providers[0].clone();
+    let mut models = before.models.clone();
+    models.sort();
+    assert_eq!(models, ["first-model", "second-model"]);
+    assert_eq!(before.name, "Configured endpoint");
+    assert_eq!(before.headers, [("x-organization".into(), "ORG".into())]);
+    assert!(
+        store
+            .change(|data| data.add_provider_models(id, vec!["invalid\nmodel".into()]))
+            .is_err()
+    );
+    assert_eq!(store.snapshot().providers[0].models, before.models);
+    drop(store);
+    assert_eq!(
+        Store::open(directory.path()).unwrap().snapshot().providers[0].models,
+        before.models
+    );
+}

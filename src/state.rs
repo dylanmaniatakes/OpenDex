@@ -817,6 +817,28 @@ impl Default for Data {
 }
 
 impl Data {
+    pub fn add_provider_models(&mut self, id: Uuid, mut models: Vec<String>) -> Result<Provider> {
+        normalize_models(&mut models)?;
+        let connection = self
+            .providers
+            .iter_mut()
+            .find(|item| item.id == id)
+            .context("That provider no longer exists.")?;
+        connection.models.extend(models);
+        normalize_models(&mut connection.models)?;
+        Ok(connection.clone())
+    }
+
+    pub fn remove_provider_model(&mut self, id: Uuid, model: &str) -> Result<Provider> {
+        let connection = self
+            .providers
+            .iter_mut()
+            .find(|item| item.id == id)
+            .context("That provider no longer exists.")?;
+        connection.models.retain(|item| item != model);
+        Ok(connection.clone())
+    }
+
     pub(crate) fn set_web_search(&mut self, search: Option<web::Config>) {
         if self.web_search != search {
             self.web_search = search;
