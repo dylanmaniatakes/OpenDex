@@ -365,3 +365,32 @@ fn concurrent_model_updates_preserve_connection_settings_and_other_models() {
         before.models
     );
 }
+
+#[test]
+fn mcp_http_header_rules_are_validated_and_managed_headers_locked() {
+    use opendex::state::Transport;
+    let mut server: Server = serde_json::from_value(json!({
+        "id": Uuid::new_v4(), "name": "Fixture", "transport": "http",
+        "address": "http://localhost/mcp"
+    }))
+    .unwrap();
+    server.transport = Transport::Http;
+    server.headers = vec![("x-organization".to_string(), "ORG".to_string())];
+    server.validate().unwrap();
+
+    server
+        .headers
+        .push(("X-Organization".to_string(), "OTHER".to_string()));
+    assert!(server.validate().is_err());
+
+    server.headers = vec![("authorization".to_string(), "SECRET".to_string())];
+    assert!(server.validate().is_err());
+
+    server.headers = vec![("Mcp-Session-Id".to_string(), "X".to_string())];
+    assert!(server.validate().is_err());
+
+    server.transport = Transport::Stdio;
+    server.headers = vec![("x-organization".to_string(), "ORG".to_string())];
+    server.validate().unwrap();
+    assert!(server.headers.is_empty());
+}
