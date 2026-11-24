@@ -1023,4 +1023,21 @@ mod tests {
         assert!(Store::open(directory.path()).is_err());
         drop(reopened);
     }
+
+    #[test]
+    fn anthropic_account_mode_keeps_the_official_endpoint() {
+        let mut provider = Provider::local();
+        provider.kind = ProviderKind::Anthropic;
+        provider.anthropic_auth = AnthropicAuth::Account;
+        provider.endpoint = "https://gateway.example.org/v1".into();
+        assert!(provider.validate().is_err());
+
+        provider.endpoint = ProviderKind::Anthropic.endpoint().into();
+        provider.validate().unwrap();
+        assert_eq!(provider.anthropic_auth, AnthropicAuth::Account);
+
+        provider.anthropic_auth = AnthropicAuth::Api;
+        provider.endpoint = "https://gateway.example.org/v1".into();
+        provider.validate().unwrap();
+    }
 }
