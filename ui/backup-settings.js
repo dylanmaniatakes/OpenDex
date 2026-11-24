@@ -84,8 +84,9 @@ function restoreForm(api, section, run, permissionName, onRestored) {
       clearPreview();
       await onRestored();
       status.textContent = 'Settings restored.';
+      if (restored.chatgpt_session_skipped) api.toast('Settings restored. Sign in to ChatGPT on this computer to reconnect the account.');
       if (restored.obsolete_keys_remaining) api.toast('Settings restored. Some previous keys could not be removed from the system credential store.', true);
-      else api.toast('Settings restored.');
+      else if (!restored.chatgpt_session_skipped) api.toast('Settings restored.');
     }), { glyph: 'check', style: 'button primary' });
     const showNames = (title, values) => values.length > 0 && el('div', {},
       el('strong', {}, title),
@@ -93,7 +94,7 @@ function restoreForm(api, section, run, permissionName, onRestored) {
     preview.replaceChildren(el('div', { class: 'backup-preview' },
       el('h4', {}, 'Ready to restore'),
       el('p', { class: 'muted' }, 'Restoring replaces saved providers, MCP configuration, web search, image preferences, permissions, appearance, and global instructions. Your current conversations and project links are kept.'),
-      info.has_chatgpt_connection && el('p', { class: 'muted' }, info.has_chatgpt_session ? 'Includes a ChatGPT session. Restoring replaces the session in OpenDex’s dedicated Codex credential entry.' : 'No ChatGPT session is included. Sign in again under Providers → ChatGPT Account.'),
+      info.has_chatgpt_connection && el('p', { class: 'muted' }, info.has_chatgpt_session && !info.can_restore_chatgpt_session ? 'Includes a ChatGPT session that this platform cannot restore. Other settings and keys will restore. Sign in to ChatGPT afterward.' : info.has_chatgpt_session ? 'Includes a ChatGPT session. Restoring replaces the session in OpenDex’s dedicated Codex credential entry.' : 'No ChatGPT session is included. Sign in again under Providers → ChatGPT Account.'),
       showNames('Providers', info.providers),
       showNames('MCP servers', info.mcp_servers),
       info.web_search && el('p', {}, 'Web search ', el('strong', {}, info.web_search)),

@@ -82,6 +82,7 @@ pub struct Preview {
     pub projects: Vec<ProjectPreview>,
     pub has_chatgpt_connection: bool,
     pub has_chatgpt_session: bool,
+    pub can_restore_chatgpt_session: bool,
     pub permission_profile: Profile,
     pub codex_path: String,
 }
@@ -89,6 +90,7 @@ pub struct Preview {
 #[derive(Serialize)]
 pub struct RestoreResult {
     pub obsolete_keys_remaining: usize,
+    pub chatgpt_session_skipped: bool,
 }
 
 impl Archive {
@@ -257,6 +259,7 @@ impl Archive {
                 })
                 .collect(),
             has_chatgpt_session: self.chatgpt_session.is_some(),
+            can_restore_chatgpt_session: !cfg!(target_os = "windows"),
             has_chatgpt_connection: self
                 .providers
                 .iter()
@@ -268,10 +271,15 @@ impl Archive {
 
     /// Write restored keys to new slots before replacing any settings. Failure leaves the
     /// old workspace file and its credentials in place, even when settings reuse their IDs.
-    pub fn restore(
+    pub fn restore(self, store: &Store, remap: HashMap<Uuid, PathBuf>) -> Result<RestoreResult> {
+        self.restore_with_session_support(store, remap, !cfg!(target_os = "windows"))
+    }
+
+    fn restore_with_session_support(
         mut self,
         store: &Store,
         remap: HashMap<Uuid, PathBuf>,
+        session_supported: bool,
     ) -> Result<RestoreResult> {
         for (id, path) in remap {
             let project = self
@@ -282,8 +290,10 @@ impl Archive {
             project.root = agent::checked_root(&path)?;
         }
         let session = self.chatgpt_session.take();
+        let chatgpt_session_skipped = session.is_some() && !session_supported;
         let mut session_swap = session
             .as_ref()
+            .filter(|_| session_supported)
             .map(|session| SessionSwap::stage(&store.codex_home(), &session.0))
             .transpose()?;
         let mut staged = StagedKeys::default();
@@ -321,6 +331,7 @@ impl Archive {
             .count();
         Ok(RestoreResult {
             obsolete_keys_remaining,
+            chatgpt_session_skipped,
         })
     }
 
@@ -557,4 +568,42 @@ pub fn open(
     })?;
     archive.validate()?;
     Ok((archive, checksum))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_session_backend_keeps_settings_restore_available() {
+        let folder = tempfile::tempdir().unwrap();
+        let store = Store::open(folder.path()).unwrap();
+        // Capture without a ChatGPT connection first, so the test never reads
+        // the OS keyring. Inject only disposable session bytes afterward.
+        let mut archive = Archive::capture(&Data::default(), &store.codex_home()).unwrap();
+        archive.providers.push(Connection {
+            settings: Provider {
+                kind: ProviderKind::ChatGptAccount,
+                endpoint: String::new(),
+                name: "ChatGPT account".into(),
+                ..Provider::local()
+            },
+            key: None,
+        });
+        archive.instructions = "Restored instructions".into();
+        archive.chatgpt_session = Some(ArchiveKey(serde_json::json!({"tokens":{"access_token":"dummy-access", "refresh_token":"dummy-refresh"}}).to_string()));
+        archive.validate().unwrap();
+        let result = archive
+            .restore_with_session_support(&store, HashMap::new(), false)
+            .unwrap();
+        assert!(result.chatgpt_session_skipped);
+        assert_eq!(store.snapshot().instructions, "Restored instructions");
+        assert!(
+            store
+                .snapshot()
+                .providers
+                .iter()
+                .any(|provider| provider.kind == ProviderKind::ChatGptAccount)
+        );
+    }
 }
