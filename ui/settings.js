@@ -297,13 +297,13 @@ export function settingsPanel(api) {
     );
   }
 
-  async function addModel(provider, id) {
-    id = id.trim();
-    if (!id || provider.models.includes(id)) return;
-    await api.invoke('save_provider', { value: { ...provider, models: [...provider.models, id] }, secret: null, forget: false });
+  async function addModels(provider, ids) {
+    const models = [...new Set(ids.map((id) => id.trim()).filter(Boolean))];
+    if (!models.length) throw new Error('Enter at least one model ID.');
+    await api.invoke('add_provider_models', { id: provider.id, models });
     await api.refresh();
     render();
-    api.toast('Model added to the picker.');
+    api.toast('Model picker updated.');
   }
 
   function models(provider) {
@@ -318,7 +318,7 @@ export function settingsPanel(api) {
       if (!available) return;
       const matches = available.filter((id) => id.toLowerCase().includes(text));
       const buttons = matches.slice(0, 55).map((id) =>
-        button(id, () => addModel(provider, id).catch((error) => api.toast(String(error), true)), {
+        button(id, () => addModels(provider, [id]).catch((error) => api.toast(String(error), true)), {
           glyph: provider.models.includes(id) ? 'check' : 'plus',
           disabled: provider.models.includes(id), style: 'catalog-result',
         }));
@@ -336,11 +336,12 @@ export function settingsPanel(api) {
         api.toast(`Found ${values.length} model${values.length === 1 ? '' : 's'}.`);
       });
     }, { glyph: 'refresh' });
-    const manual = input('', { placeholder: 'Enter a model ID', spellcheck: 'false', required: true, 'aria-label': 'Model ID' });
-    const manualForm = el('form', { class: 'inline-form', onsubmit: (event) => {
+    const manual = textarea('', { rows: 3, placeholder: 'Model IDs, one per line', spellcheck: 'false', required: true, 'aria-label': 'Model IDs' });
+    const add = el('button', { type: 'submit', class: 'button' }, icon('plus', 16), 'Add models');
+    const manualForm = el('form', { class: 'details-form', onsubmit: async (event) => {
       event.preventDefault();
-      addModel(provider, manual.value).catch((error) => api.toast(String(error), true));
-    } }, manual, el('button', { type: 'submit', class: 'button' }, icon('plus', 16), 'Add model'));
+      await run(add, status, () => addModels(provider, lines(manual.value)));
+    } }, manual, el('div', { class: 'form-actions' }, add));
     const pinned = el('div', { class: 'pinned-models' }, provider.models.map((id) =>
       el('div', { class: 'chip' }, el('span', {}, id), button('Remove ' + id, async () => {
         try {

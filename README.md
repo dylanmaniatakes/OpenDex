@@ -7,7 +7,7 @@ I built OpenDex to use the models I choose for everyday chat and coding. It runs
 1. Open `dist/OpenDex.app` if you have the local preview bundle. To build it yourself, follow the instructions below.
 2. In **Model Chat**, choose **Find local models** if you already run Ollama. Pick an installed model to add it to the composer.
 3. To connect another service, open **Settings → Providers → Add provider**. Choose an adapter, enter the base URL and key if the endpoint requires one, and save.
-4. Use **Discover models** to browse an endpoint’s inventory, or enter a model ID manually. Each model I add appears in both modes. Ollama Cloud has its own searchable catalog and uses an Ollama API key.
+4. Use **Discover models** to browse an endpoint’s inventory, or paste model IDs one per line and choose **Add models**. Duplicate IDs are removed. Each model I add appears in both modes. Ollama Cloud has its own searchable catalog and uses an Ollama API key.
 5. Use the sidebar dropdown to switch between **Model Chat** and **Code Agent**. Model Chat shows its conversations. In Code Agent, use **Add project** to choose a folder, then use the plus button beside a project to create another thread in it.
 
 I can rename or export each conversation and set instructions globally or per thread. Both modes stream replies, and the stop button interrupts the active turn.

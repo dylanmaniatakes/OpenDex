@@ -146,6 +146,21 @@ fn save_provider(
     }))
 }
 
+/// Merge model IDs under the store lock so simultaneous additions keep both lists.
+#[tauri::command]
+fn add_provider_models(app: AppState<'_>, id: Uuid, models: Vec<String>) -> Reply<Provider> {
+    reply(app.store.change(|data| {
+        let connection = data
+            .providers
+            .iter_mut()
+            .find(|item| item.id == id)
+            .context("That provider no longer exists.")?;
+        connection.models.extend(models);
+        crate::state::normalize_models(&mut connection.models)?;
+        Ok(connection.clone())
+    }))
+}
+
 #[tauri::command]
 fn remove_provider(app: AppState<'_>, id: Uuid) -> Reply<()> {
     reply(app.store.change(|data| {
@@ -1722,6 +1737,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             save_provider,
+            add_provider_models,
             remove_provider,
             discover_models,
             anthropic_account_status,
