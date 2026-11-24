@@ -64,14 +64,6 @@ pub struct Account {
     pub error: Option<String>,
 }
 
-fn base_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .user_agent(concat!("OpenDex/", env!("CARGO_PKG_VERSION")))
-        .build()?)
-}
-
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -154,7 +146,7 @@ pub async fn request(
     }
     let credentials = match account_credentials(provider)? {
         Some(credentials) if credentials.expires_at_ms > now_ms() + 60_000 => credentials,
-        Some(credentials) => ensure_credentials(client, provider, credentials).await?,
+        Some(_) => ensure_credentials(client, provider).await?,
         None => bail!("Connect the Anthropic account before using it."),
     };
     let mut request = request.bearer_auth(&credentials.access_token);
@@ -164,19 +156,15 @@ pub async fn request(
     Ok(request)
 }
 
-async fn ensure_credentials(
-    _client: &reqwest::Client,
-    provider: &Provider,
-    current: Credentials,
-) -> Result<Credentials> {
+async fn ensure_credentials(client: &reqwest::Client, provider: &Provider) -> Result<Credentials> {
     let _lock = refresh_lock().lock().await;
     let now = now_ms();
-    if let Ok(Some(credentials)) = account_credentials(provider)
-        && credentials.expires_at_ms > now + 60_000
-    {
-        return Ok(credentials);
+    let latest =
+        account_credentials(provider)?.context("Connect the Anthropic account before using it.")?;
+    if latest.expires_at_ms > now + 60_000 {
+        return Ok(latest);
     }
-    refresh(provider, current).await
+    refresh(client, provider, latest).await
 }
 
 fn refresh_lock() -> &'static Mutex<()> {
@@ -184,8 +172,11 @@ fn refresh_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(Mutex::default)
 }
 
-async fn refresh(provider: &Provider, previous: Credentials) -> Result<Credentials> {
-    let client = base_client()?;
+async fn refresh(
+    client: &reqwest::Client,
+    provider: &Provider,
+    previous: Credentials,
+) -> Result<Credentials> {
     let response = client
         .post(TOKEN_URL)
         .json(&serde_json::json!({
@@ -209,15 +200,27 @@ async fn save_token(
     body: &serde_json::Value,
     previous: Option<Credentials>,
 ) -> Result<Credentials> {
+    let credentials = parse_token(body, previous.as_ref(), now_ms())?;
+    let encoded = serde_json::to_string(&credentials)?;
+    write_secret(provider.credential_id(), &provider.endpoint, &encoded)?;
+    Ok(credentials)
+}
+
+fn parse_token(
+    body: &serde_json::Value,
+    previous: Option<&Credentials>,
+    now: u64,
+) -> Result<Credentials> {
     let access_token = body
         .get("access_token")
         .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
         .context("Anthropic did not return an access token.")?;
     let refresh_token = body
         .get("refresh_token")
         .and_then(|value| value.as_str())
         .map(String::from)
-        .or_else(|| previous.map(|item| item.refresh_token))
+        .or_else(|| previous.map(|item| item.refresh_token.clone()))
         .context("Anthropic did not return a refresh token.")?;
     let expires_in = body
         .get("expires_in")
@@ -226,7 +229,7 @@ async fn save_token(
     let credentials = Credentials {
         access_token: access_token.to_string(),
         refresh_token,
-        expires_at_ms: now_ms() + expires_in.saturating_mul(1_000),
+        expires_at_ms: now.saturating_add(expires_in.saturating_mul(1_000)),
         account: body
             .get("account")
             .and_then(|value| value.get("email_address"))
@@ -237,15 +240,24 @@ async fn save_token(
             .and_then(|value| value.get("uuid"))
             .and_then(|value| value.as_str())
             .map(String::from),
-        subscription: None,
+        subscription: previous.and_then(|item| item.subscription.clone()),
         scope: body
             .get("scope")
             .and_then(|value| value.as_str())
             .map(String::from),
     };
-    let encoded = serde_json::to_string(&credentials)?;
-    write_secret(provider.credential_id(), &provider.endpoint, &encoded)?;
-    Ok(credentials)
+    Ok(Credentials {
+        account: credentials
+            .account
+            .or_else(|| previous.and_then(|item| item.account.clone())),
+        organization: credentials
+            .organization
+            .or_else(|| previous.and_then(|item| item.organization.clone())),
+        scope: credentials
+            .scope
+            .or_else(|| previous.and_then(|item| item.scope.clone())),
+        ..credentials
+    })
 }
 
 async fn exchange_code(
@@ -364,7 +376,11 @@ async fn read_callback(listener: &mut tokio::net::TcpListener, state: &str) -> R
 }
 
 pub fn disconnect(provider: &Provider) -> Result<Provider> {
-    account_credentials(provider)?;
+    ensure!(
+        provider.kind == ProviderKind::Anthropic
+            && provider.anthropic_auth == AnthropicAuth::Account,
+        "That connection does not use Anthropic account sign-in."
+    );
     let mut provider = provider.clone();
     delete_secret(provider.credential_id(), &provider.endpoint)?;
     provider.has_secret = false;
@@ -444,5 +460,47 @@ fn open_browser(url: &str) -> bool {
 pub fn ensure_api_fallback(provider: &mut Provider) {
     if provider.anthropic_auth == AnthropicAuth::Account && !provider.has_secret {
         provider.anthropic_auth = AnthropicAuth::Api;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn refresh_preserves_identity_and_accepts_rotated_tokens() {
+        let previous = Credentials {
+            access_token: "expired".into(),
+            refresh_token: "old-refresh".into(),
+            expires_at_ms: 1,
+            account: Some("person@example.org".into()),
+            organization: Some("organization".into()),
+            subscription: Some("subscription".into()),
+            scope: Some("user:inference".into()),
+        };
+        let renewed = parse_token(
+            &json!({"access_token":"renewed", "expires_in":3600}),
+            Some(&previous),
+            1000,
+        )
+        .unwrap();
+        assert_eq!(renewed.refresh_token, "old-refresh");
+        assert_eq!(renewed.account, previous.account);
+        assert_eq!(renewed.organization, previous.organization);
+        assert_eq!(renewed.subscription, previous.subscription);
+        assert_eq!(renewed.scope, previous.scope);
+        assert_eq!(renewed.expires_at_ms, 3_601_000);
+
+        let rotated = parse_token(
+            &json!({"access_token":"new", "refresh_token":"rotated", "expires_in":3600}),
+            Some(&renewed),
+            2000,
+        )
+        .unwrap();
+        assert_eq!(rotated.refresh_token, "rotated");
+        assert_eq!(rotated.access_token, "new");
+        assert!(parse_token(&json!({"access_token":""}), Some(&previous), 1000).is_err());
+        assert!(parse_token(&json!({"access_token":"new"}), None, 1000).is_err());
     }
 }
