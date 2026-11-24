@@ -948,7 +948,24 @@ fn export_thread(app: AppState<'_>, id: Uuid, path: PathBuf) -> Reply<()> {
     reply((|| {
         let data = app.store.snapshot();
         let thread = fetch_thread(&data, id)?;
-        let mut content = format!("# {}\n", thread.title);
+        let provider = thread
+            .provider_id
+            .and_then(|id| data.providers.iter().find(|provider| provider.id == id));
+        let mut content = format!(
+            "# {}\n\n{} · {}\n",
+            thread.title,
+            provider.map_or_else(
+                || "No provider selected".to_owned(),
+                |provider| provider.name.clone()
+            ),
+            thread.model_id.clone().unwrap_or_default()
+        );
+        if !thread.instructions.trim().is_empty() {
+            content.push_str(&format!(
+                "\n\n<thread_instructions>\n{}\n</thread_instructions>",
+                thread.instructions
+            ));
+        }
         for message in &thread.messages {
             if message.role == Role::Tool || !message.has_content() {
                 continue;
@@ -959,6 +976,21 @@ fn export_thread(app: AppState<'_>, id: Uuid, path: PathBuf) -> Reply<()> {
                 message.model.as_deref().unwrap_or("Assistant")
             };
             content.push_str(&format!("\n## {label}\n\n{}\n", message.content()));
+            for attachment in &message.attachments {
+                if attachment.media_type.is_some() {
+                    content.push_str(&format!(
+                        "\nAttached media: {} ({})\n",
+                        attachment.name,
+                        attachment.media_type.as_deref().unwrap_or("unknown")
+                    ));
+                }
+            }
+            for resource in &message.resources {
+                content.push_str(&format!(
+                    "\nMCP context: {} · {} ({})\n",
+                    resource.source, resource.name, resource.uri
+                ));
+            }
         }
         std::fs::write(path, content)?;
         Ok(())
@@ -1007,6 +1039,58 @@ async fn add_worktree(
         }
         .await,
     )
+}
+
+/// Used by integration tests to check exported conversation formatting.
+pub fn export_thread_for_test(store: &Store, id: Uuid, path: &PathBuf) -> Result<()> {
+    let data = store.snapshot();
+    let thread = fetch_thread(&data, id)?;
+    let provider = thread
+        .provider_id
+        .and_then(|id| data.providers.iter().find(|provider| provider.id == id));
+    let mut content = format!(
+        "# {}\n\n{} · {}\n",
+        thread.title,
+        provider.map_or_else(
+            || "No provider selected".to_owned(),
+            |provider| provider.name.clone()
+        ),
+        thread.model_id.clone().unwrap_or_default()
+    );
+    if !thread.instructions.trim().is_empty() {
+        content.push_str(&format!(
+            "\n\n<thread_instructions>\n{}\n</thread_instructions>",
+            thread.instructions
+        ));
+    }
+    for message in &thread.messages {
+        if message.role == Role::Tool || !message.has_content() {
+            continue;
+        }
+        let label = if message.role == Role::User {
+            "You"
+        } else {
+            message.model.as_deref().unwrap_or("Assistant")
+        };
+        content.push_str(&format!("\n## {label}\n\n{}\n", message.content()));
+        for attachment in &message.attachments {
+            if attachment.media_type.is_some() {
+                content.push_str(&format!(
+                    "\nAttached media: {} ({})\n",
+                    attachment.name,
+                    attachment.media_type.as_deref().unwrap_or("unknown")
+                ));
+            }
+        }
+        for resource in &message.resources {
+            content.push_str(&format!(
+                "\nMCP context: {} · {} ({})\n",
+                resource.source, resource.name, resource.uri
+            ));
+        }
+    }
+    std::fs::write(path, content)?;
+    Ok(())
 }
 
 struct RunGuard {

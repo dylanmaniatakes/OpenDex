@@ -394,3 +394,62 @@ fn mcp_http_header_rules_are_validated_and_managed_headers_locked() {
     server.validate().unwrap();
     assert!(server.headers.is_empty());
 }
+
+#[tokio::test]
+async fn conversation_export_includes_provider_and_saved_context() {
+    let directory = tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let mut output = std::path::PathBuf::from(directory.path());
+    output.push("export.md");
+    let (_, thread_id) = store
+        .change(|data| {
+            let mut provider = opendex::state::Provider::local();
+            provider.name = "Local model fixture".into();
+            provider.models.push("fixture-model".into());
+            let provider_id = provider.id;
+            data.providers.push(provider);
+            let mut thread = opendex::state::Thread {
+                id: Uuid::new_v4(),
+                mode: Mode::Chat,
+                title: "Saved example".into(),
+                instructions: "Be concise.".into(),
+                provider_id: Some(provider_id),
+                model_id: Some("fixture-model".into()),
+                messages: vec![],
+                workspace: None,
+                project_id: None,
+                mcp_scope: McpScope::All,
+                web_enabled: false,
+                parent_thread: None,
+            };
+            let mut message =
+                opendex::state::Message::new(opendex::state::Role::User, "Please inspect this.");
+            message.attachments.push(opendex::state::Attachment {
+                name: "diagram.pdf".into(),
+                text: "AAAA".into(),
+                media_type: Some("application/pdf".into()),
+            });
+            message.resources.push(opendex::state::McpResource {
+                server_id: provider_id,
+                source: "Fixture MCP".into(),
+                name: "Design notes".into(),
+                uri: "notes://workshop/config".into(),
+                text: "Fixture text".into(),
+            });
+            thread.messages.push(message);
+            let thread_id = thread.id;
+            data.threads.push(thread);
+            Ok((provider_id, thread_id))
+        })
+        .unwrap();
+    opendex::desktop::export_thread_for_test(&store, thread_id, &output).unwrap();
+    let markdown = fs::read_to_string(&output).unwrap();
+    assert!(markdown.contains("# Saved example"));
+    assert!(markdown.contains("Local model fixture · fixture-model"));
+    assert!(markdown.contains("<thread_instructions>"));
+    assert!(markdown.contains("\n## You\n\nPlease inspect this."));
+    assert!(markdown.contains("Please inspect this."));
+    assert!(markdown.contains("Attached media: diagram.pdf (application/pdf)"));
+    assert!(markdown.contains("MCP context: Fixture MCP · Design notes (notes://workshop/config)"));
+    assert!(!markdown.contains("AAAA"));
+}
