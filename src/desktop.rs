@@ -2,13 +2,14 @@
 //! The webview handles presentation and user input.
 use crate::{
     agent::{self, Capability},
-    backup, codex, images,
+    anthropic, backup, codex, images,
     mcp::{self, Connection},
     providers::{self, Tool},
     state::{
-        Appearance, BranchAction, Data, MAX_RESOURCE_BYTES, MAX_RESOURCES_PER_MESSAGE, McpResource,
-        McpScope, Message, Mode, Permissions, Project, Provider, ProviderKind, Role, Rule, Server,
-        Store, Thread, ToolCall, Transport, delete_secret, one_or_many, write_secret,
+        AnthropicAuth, Appearance, BranchAction, Data, MAX_RESOURCE_BYTES,
+        MAX_RESOURCES_PER_MESSAGE, McpResource, McpScope, Message, Mode, Permissions, Project,
+        Provider, ProviderKind, Role, Rule, Server, Store, Thread, ToolCall, Transport,
+        delete_secret, one_or_many, write_secret,
     },
     web,
 };
@@ -114,7 +115,7 @@ fn save_provider(
         }
         if let Some(secret) = &secret {
             ensure!(
-                value.kind != ProviderKind::ChatGptAccount,
+                value.kind != ProviderKind::ChatGptAccount && value.anthropic_auth != AnthropicAuth::Account,
                 "Connect this provider through its account flow."
             );
             write_secret(value.credential_id(), &value.endpoint, secret)?;
@@ -600,6 +601,64 @@ fn new_thread(app: AppState<'_>, mode: Mode, project: Option<Uuid>) -> Reply<Thr
         let project = project.map(|id| find_project(data, id)).transpose()?;
         Ok(insert_thread(data, mode, project))
     }))
+}
+
+#[tauri::command]
+async fn anthropic_account_status(app: AppState<'_>, id: Uuid) -> Reply<anthropic::Account> {
+    reply(
+        async {
+            let data = app.store.snapshot();
+            let provider = provider(&data, id)?;
+            anthropic::account_status(provider).await
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn anthropic_account_connect(app: AppState<'_>, id: Uuid) -> Reply<anthropic::Account> {
+    reply(
+        async {
+            let provider = {
+                let data = app.store.snapshot();
+                provider(&data, id)?.clone()
+            };
+            let (provider, account) = anthropic::connect(&app.client, provider).await?;
+            app.store.change(|data| {
+                let matched = data
+                    .providers
+                    .iter_mut()
+                    .find(|item| item.id == id)
+                    .context("That provider no longer exists.")?;
+                *matched = provider.clone();
+                matched.validate()?;
+                Ok(())
+            })?;
+            Ok(account)
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn anthropic_account_disconnect(app: AppState<'_>, id: Uuid) -> Reply<anthropic::Account> {
+    reply(
+        async {
+            let provider = {
+                let data = app.store.snapshot();
+                provider(&data, id)?.clone()
+            };
+            let provider = anthropic::disconnect(&provider)?;
+            app.store.change(|data| {
+                if let Some(item) = data.providers.iter_mut().find(|item| item.id == id) {
+                    *item = provider.clone();
+                }
+                Ok(())
+            })?;
+            anthropic::account_status(&provider).await
+        }
+        .await,
+    )
 }
 
 #[tauri::command]
@@ -1661,6 +1720,9 @@ pub fn run() {
             save_provider,
             remove_provider,
             discover_models,
+            anthropic_account_status,
+            anthropic_account_connect,
+            anthropic_account_disconnect,
             save_server,
             remove_server,
             test_server,

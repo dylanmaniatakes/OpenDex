@@ -4,6 +4,7 @@ mod gemini;
 mod wire;
 
 use crate::state::{Message, Provider, ProviderKind, ToolCall, endpoint, read_secret};
+use crate::{anthropic, state::AnthropicAuth};
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, Response, header};
@@ -34,13 +35,28 @@ pub fn client() -> Result<Client> {
         .build()?)
 }
 
-pub(crate) fn request(provider: &Provider, request: RequestBuilder) -> Result<RequestBuilder> {
-    let secret = read_secret(
-        provider.credential_id(),
-        &provider.endpoint,
-        provider.has_secret,
-    )?;
-    request_with_secret(provider, request, secret.as_deref())
+pub(crate) async fn request(
+    client: &Client,
+    provider: &Provider,
+    request: RequestBuilder,
+) -> Result<RequestBuilder> {
+    let secret = if provider.kind == ProviderKind::Anthropic
+        && provider.anthropic_auth == AnthropicAuth::Account
+    {
+        None
+    } else {
+        read_secret(
+            provider.credential_id(),
+            &provider.endpoint,
+            provider.has_secret,
+        )?
+    };
+    let mut request = request_with_secret(provider, request, secret.as_deref())?;
+    if provider.kind == ProviderKind::Anthropic && provider.anthropic_auth == AnthropicAuth::Account
+    {
+        request = anthropic::request(client, provider, request).await?;
+    }
+    Ok(request)
 }
 
 fn request_with_secret(
@@ -113,7 +129,7 @@ pub async fn discover(client: &Client, provider: &Provider) -> Result<Vec<String
         let get = if provider.kind == ProviderKind::OllamaCloud {
             client.get("https://ollama.com/api/tags")
         } else {
-            request(provider, client.get(base.clone()))?
+            request(client, provider, client.get(base.clone())).await?
         };
         let response = checked(get.send().await?).await?;
         let body: Value = response
@@ -167,7 +183,8 @@ pub async fn generate(
         .pop_if_empty()
         .extend(path.split('/'));
     let response = checked(
-        request(provider, client.post(url))?
+        request(client, provider, client.post(url))
+            .await?
             .json(&payload)
             .send()
             .await?,

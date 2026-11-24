@@ -24,6 +24,14 @@ pub enum ProviderKind {
     ChatGptAccount,
 }
 
+#[derive(Debug, Clone, Default, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicAuth {
+    #[default]
+    Api,
+    Account,
+}
+
 impl ProviderKind {
     pub fn endpoint(self) -> &'static str {
         match self {
@@ -57,6 +65,8 @@ pub struct Provider {
     pub token_limit: Option<u32>,
     #[serde(default)]
     pub ollama_think: Option<bool>,
+    #[serde(default)]
+    pub anthropic_auth: AnthropicAuth,
 }
 
 impl Provider {
@@ -73,6 +83,7 @@ impl Provider {
             headers: vec![],
             token_limit: None,
             ollama_think: None,
+            anthropic_auth: AnthropicAuth::Api,
         }
     }
 
@@ -82,7 +93,9 @@ impl Provider {
 
     pub fn key_header(&self) -> Option<&str> {
         self.api_key_header.as_deref().or(match self.kind {
-            ProviderKind::Anthropic => Some("x-api-key"),
+            ProviderKind::Anthropic if self.anthropic_auth == AnthropicAuth::Api => {
+                Some("x-api-key")
+            }
             ProviderKind::Gemini => Some("x-goog-api-key"),
             _ => None,
         })
@@ -122,6 +135,17 @@ impl Provider {
         }
         normalize_models(&mut self.models)?;
         ensure!(self.token_limit != Some(0), "Token limit must be positive.");
+        if self.anthropic_auth == AnthropicAuth::Account {
+            if self.kind == ProviderKind::Anthropic {
+                ensure!(
+                    self.endpoint == ProviderKind::Anthropic.endpoint(),
+                    "Account login uses the official Anthropic endpoint."
+                );
+                self.api_key_header = None;
+            } else {
+                self.anthropic_auth = AnthropicAuth::Api;
+            }
+        }
         Ok(())
     }
 }

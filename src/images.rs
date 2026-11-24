@@ -119,7 +119,8 @@ pub async fn generate(
     if provider.kind == ProviderKind::OpenAiCompatible && config.request_base64 {
         payload["response_format"] = json!("b64_json");
     }
-    let request = providers::request(provider, client.post(url.clone()).json(&payload))?;
+    let request =
+        providers::request(client, provider, client.post(url.clone()).json(&payload)).await?;
     let response = request.timeout(Duration::from_secs(360)).send().await?;
     let body = limited_body(providers::checked(response).await?, MAX_JSON_BYTES).await?;
     let response: ImageResponse = serde_json::from_slice(&body)

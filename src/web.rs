@@ -156,12 +156,15 @@ impl Service {
                     Self::Searxng(url) => client
                         .get(url.clone())
                         .query(&[("q", query.as_str()), ("format", "json")]),
-                    Self::Ollama(provider) => ollama_request(
-                        client,
-                        provider,
-                        SEARCH,
-                        json!({"query":query,"max_results":limit}),
-                    )?,
+                    Self::Ollama(provider) => {
+                        ollama_request(
+                            client,
+                            provider,
+                            SEARCH,
+                            json!({"query":query,"max_results":limit}),
+                        )
+                        .await?
+                    }
                 };
                 let response = response(request, matches!(self, Self::Searxng(_))).await?;
                 let results = response["results"]
@@ -188,7 +191,8 @@ impl Service {
                 let Self::Ollama(provider) = self else {
                     bail!("This search service does not support fetching pages.");
                 };
-                let request = ollama_request(client, provider, FETCH, json!({"url":url.as_str()}))?;
+                let request =
+                    ollama_request(client, provider, FETCH, json!({"url":url.as_str()})).await?;
                 let response = response(request, false).await?;
                 ensure!(
                     response["content"].is_string(),
@@ -203,7 +207,7 @@ impl Service {
     }
 }
 
-fn ollama_request(
+async fn ollama_request(
     client: &Client,
     provider: &Provider,
     path: &str,
@@ -214,7 +218,7 @@ fn ollama_request(
         .map_err(|_| anyhow::anyhow!("Invalid Ollama API endpoint."))?
         .pop_if_empty()
         .push(path);
-    providers::request(provider, client.post(url).json(&payload))
+    providers::request(client, provider, client.post(url).json(&payload)).await
 }
 
 async fn response(request: RequestBuilder, searxng: bool) -> Result<Value> {

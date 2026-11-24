@@ -22,7 +22,7 @@ In **Model Chat**, I can edit a user message or retry a reply. Both actions crea
 | --- | --- | --- |
 | OpenAI API | `https://api.openai.com/v1` | OpenAI API key. Uses the Responses API. |
 | ChatGPT Account | Installed `codex` executable | Browser sign-in through Codex app-server. Uses eligible Codex models. |
-| Anthropic API | `https://api.anthropic.com/v1` | Anthropic Console key. Uses the Messages API. |
+| Anthropic API | `https://api.anthropic.com/v1` | Anthropic Console key or Claude account sign-in. Uses the Messages API. |
 | Google Gemini API | `https://generativelanguage.googleapis.com/v1beta` | Google AI Studio API key. Uses native Gemini streaming and function calling. |
 | Ollama Local | `http://127.0.0.1:11434/api` | Local Ollama normally accepts unauthenticated requests. |
 | Ollama Cloud | `https://ollama.com/api` | Ollama API key. |
@@ -34,7 +34,7 @@ For Gemini, I can discover models that support content generation, add model IDs
 
 For a ChatGPT account, I install the [Codex CLI](https://learn.chatgpt.com/docs/cli), add the **ChatGPT Account** adapter, and click **Connect account**. The Codex executable opens the official browser flow and manages its own credentials. OpenDex uses a dedicated Codex home so the connection is independent of my terminal setup. The browser flow and subscribed inference are still part of my live verification checklist. [Codex app-server authentication](https://learn.chatgpt.com/docs/app-server#auth-endpoints)
 
-I use an Anthropic Console API key for Claude in OpenDex. Claude.ai subscription sign-in is available through Anthropic’s own flow under its current authentication policy. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+I can use Anthropic two ways. A Console API key works with the standard Messages API. I can also select **Claude account** in the provider settings, then use **Connect account** to open Anthropic’s sign-in page in my browser. That request asks only for Claude inference and profile access. OpenDex keeps the session token in the system credential store and refreshes it when it expires. To switch back to an API key, I first sign out of the account, then save my Console key. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
 
 ## Code Agent and permissions
 
@@ -119,6 +119,7 @@ I tested image generation in both modes with a local Images API fixture. I verif
 ### Source layout
 
 - `src/providers` contains inventory discovery, API payloads, and streaming decoders.
+- `src/anthropic.rs` handles Anthropic account sign-in and session refresh.
 - `src/state.rs` owns the conversation and settings schema, atomic persistence, and credential access.
 - `src/backup.rs` owns encrypted settings export, restore preview, and credential restoration.
 - `src/agent.rs` contains project file tools, command scoping, and Git operations.

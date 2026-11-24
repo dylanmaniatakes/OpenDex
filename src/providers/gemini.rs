@@ -32,7 +32,13 @@ pub(super) async fn discover(client: &Client, provider: &Provider) -> Result<Vec
     let mut models = Vec::new();
     let mut cursors = HashSet::new();
     for _ in 0..20 {
-        let response = checked(request(provider, client.get(url.clone()))?.send().await?).await?;
+        let response = checked(
+            request(client, provider, client.get(url.clone()))
+                .await?
+                .send()
+                .await?,
+        )
+        .await?;
         let body: Value = response
             .json()
             .await
@@ -273,7 +279,8 @@ pub(super) async fn generate(
         .push(&format!("{model}:streamGenerateContent"));
     url.query_pairs_mut().append_pair("alt", "sse");
     let response = checked(
-        request(provider, client.post(url))?
+        request(client, provider, client.post(url))
+            .await?
             .json(&payload(provider, system, messages, tools)?)
             .send()
             .await?,
