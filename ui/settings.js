@@ -162,15 +162,6 @@ export function settingsPanel(api) {
       );
       if (provider.has_secret) form.append(check('Forget saved key', false, (value) => { forget = value; }));
     }
-    const valuePatch = {
-      name: name.value,
-      endpoint: endpoint.value,
-      api_key_header: keyHeader.value.trim() || null,
-      headers: headerPairs,
-      token_limit: numberOrNull(tokenLimit.value),
-      ollama_think: think === 'default' ? null : think === 'true',
-      anthropic_auth: anthropic ? anthropicAuth : undefined,
-    };
     if (anthropic) {
       form.append(field('Anthropic access', options([['api', 'Console API key'], ['account', 'Claude account']], anthropicAuth,
         (value) => {
@@ -202,6 +193,15 @@ export function settingsPanel(api) {
           if (at < 1) throw new Error('Use HEADER_NAME=ENVIRONMENT_VARIABLE for each header.');
           return [line.slice(0, at).trim(), line.slice(at + 1).trim()];
         });
+        const valuePatch = {
+          name: name.value,
+          endpoint: endpoint.value,
+          api_key_header: keyHeader.value.trim() || null,
+          headers: headerPairs,
+          token_limit: numberOrNull(tokenLimit.value),
+          ollama_think: think === 'default' ? null : think === 'true',
+          anthropic_auth: anthropic ? anthropicAuth : 'api',
+        };
         const value = { ...provider, ...valuePatch };
         const saved = await api.invoke('save_provider', { value, secret: secret.value || null, forget });
         selectedProvider = saved.id; newProviderKind = null; catalogSearch = '';
@@ -214,7 +214,7 @@ export function settingsPanel(api) {
 
     const section = formSection(adding ? 'New connection' : provider.name, '', form);
     if (anthropic && anthropicAuth === 'account') {
-      section.append(anthropicAccount(provider));
+      section.append(adding ? el('p', { class: 'field-note' }, 'Save the connection to sign in.') : anthropicAccount(provider));
     } else if (provider.kind === 'anthropic') {
       section.append(el('p', { class: 'field-note' }, 'Claude API uses a Console key. Claude.ai subscription sign-in needs an Anthropic account.'));
     }
@@ -225,49 +225,35 @@ export function settingsPanel(api) {
   function anthropicAccount(provider) {
     const status = el('div', { class: 'form-status', role: 'status' }, 'Checking Claude account…');
     const actions = el('div', { class: 'form-actions' });
-    let connected = false;
     const savedAsAccount = provider.anthropic_auth === 'account' && provider.kind === 'anthropic';
     if (!savedAsAccount) {
       status.textContent = 'Save this Anthropic connection first.';
-    } else if (!provider.has_secret) {
-      api.invoke('anthropic_account_status', { id: provider.id }).then((result) => {
-        connected = !!result.connected;
-        const details = [
-          result.email,
-          result.organization,
-          result.subscription,
-          result.expires_in != null ? `Token expires in ${Math.floor(result.expires_in / 60)} min` : null,
-        ].filter(Boolean).join(' · ');
-        status.textContent = connected ? 'Signed in.' : 'Not signed in.';
-        if (connected && details) status.textContent = `Signed in. ${details}`;
-      }).catch((error) => {
-        status.textContent = String(error);
-      });
-      actions.append(
-        button(!connected ? 'Connect account' : 'Reconnect account', async () => {
-          await run(status, status, async () => {
-            status.textContent = 'Waiting for browser sign-in…';
-            try {
-              await api.invoke('anthropic_account_connect', { id: provider.id });
-              api.toast('Anthropic account connected.');
-            } finally {
-              await api.refresh();
-              render();
-            }
-          });
-        }, { glyph: connected ? 'refresh' : 'arrow', style: 'button primary' }),
-        button('Sign out', async () => {
-          await run(status, status, async () => {
-            await api.invoke('anthropic_account_disconnect', { id: provider.id });
-            await api.refresh();
-            render();
-          });
-        }, { disabled: !connected }),
-        status,
-      );
     } else {
-      status.textContent = 'Forget the saved Console key before connecting an account.';
+      const connect = button('Connect account', async () => {
+        await run(connect, status, async () => {
+          status.textContent = 'Waiting for browser sign-in…';
+          await api.invoke('anthropic_account_connect', { id: provider.id });
+          await api.refresh();
+          render();
+          api.toast('Anthropic account connected.');
+        });
+      }, { glyph: 'arrow', style: 'button primary', disabled: provider.has_secret });
+      const disconnect = button('Sign out', async () => {
+        await run(disconnect, status, async () => {
+          await api.invoke('anthropic_account_disconnect', { id: provider.id });
+          await api.refresh();
+          render();
+        });
+      }, { disabled: !provider.has_secret });
+      actions.append(connect, disconnect);
+      api.invoke('anthropic_account_status', { id: provider.id }).then((result) => {
+        const details = [result.email, result.organization, result.subscription].filter(Boolean).join(' · ');
+        status.textContent = result.connected ? ['Signed in.', details, result.error].filter(Boolean).join(' ') : 'Not signed in.';
+        connect.disabled = result.connected;
+        disconnect.disabled = !result.connected;
+      }).catch((error) => { status.textContent = String(error); });
     }
+    actions.append(status);
     return el('div', { class: 'account-panel' },
       el('h4', {}, 'Sign in with Claude'),
       el('p', { class: 'field-note' }, 'OpenDex opens Anthropic’s sign-in page in your browser and stores only the session keys OpenDex needs. This uses inference and profile access.'),

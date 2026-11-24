@@ -36,6 +36,8 @@ For a ChatGPT account, I install the [Codex CLI](https://learn.chatgpt.com/docs/
 
 I can use Anthropic two ways. A Console API key works with the standard Messages API. I can also select **Claude account** in the provider settings, save the connection, then use **Connect account** to open Anthropic’s sign-in page in my browser. That request asks only for Claude inference and profile access. OpenDex keeps the session token in the system credential store and refreshes it when it expires. To switch back to an API key, I first sign out of the account, then save my Console key. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
 
+The Anthropic browser sign-in, subscribed model discovery, token refresh, and inference still need live verification. Frontend checks cover saving provider values and signing out through the account controls.
+
 ## Code Agent and permissions
 
 I choose a project folder for Code Agent to read, search, and edit. A Git worktree gives a thread a separate checkout and branch while keeping it under the original project in the sidebar. **Review changes** opens the worktree’s Git status and diff. I can run multiple conversations and use separate worktrees for concurrent agent turns on the same repository.

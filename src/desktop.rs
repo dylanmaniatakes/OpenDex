@@ -105,6 +105,10 @@ fn save_provider(
             .providers
             .iter()
             .find(|provider| provider.id == value.id);
+        ensure!(
+            !existing.is_some_and(|old| old.has_secret && old.anthropic_auth != value.anthropic_auth) || forget,
+            "Sign out or forget the saved key before changing authentication methods."
+        );
         value.secret_ref = existing.and_then(|old| old.secret_ref);
         let changed =
             existing.is_some_and(|old| old.endpoint != value.endpoint || old.kind != value.kind);

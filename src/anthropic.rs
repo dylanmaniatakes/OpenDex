@@ -364,10 +364,10 @@ async fn read_callback(listener: &mut tokio::net::TcpListener, state: &str) -> R
 }
 
 pub fn disconnect(provider: &Provider) -> Result<Provider> {
+    account_credentials(provider)?;
     let mut provider = provider.clone();
     delete_secret(provider.credential_id(), &provider.endpoint)?;
     provider.has_secret = false;
-    provider.anthropic_auth = AnthropicAuth::Api;
     Ok(provider)
 }
 
@@ -379,6 +379,11 @@ pub async fn connect(
         provider.kind == ProviderKind::Anthropic,
         "Account sign-in is available for Anthropic connections."
     );
+    ensure!(
+        provider.anthropic_auth == AnthropicAuth::Account,
+        "Save the connection in account mode before signing in."
+    );
+    provider.validate()?;
     if provider.has_secret {
         bail!("Forget the saved API key before signing in to an Anthropic account.");
     }
