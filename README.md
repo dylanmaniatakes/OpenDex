@@ -84,6 +84,8 @@ To restore, I open the backup and enter its passphrase. I review the connections
 
 My ChatGPT Account connection is included as a setting. I use **Connect account** on a new computer because Codex manages that session in its own credential store. I also set up any environment variables referenced by provider headers or local MCP servers on the new computer. [Codex credential storage](https://learn.chatgpt.com/docs/auth?surface=cli#credential-storage)
 
+My Anthropic account session is included too. It restores with the saved Anthropic endpoint and account mode, so I can reconnect with my current access token. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+
 ## Build from source
 
 I use Rust for the provider adapters, state, MCP, and permission checks. Tauri provides the desktop window and native dialogs, with a small HTML/CSS/JavaScript frontend and no Node build step. The workspace supports **Rust 1.95** and uses the checked-in dependency lockfile.

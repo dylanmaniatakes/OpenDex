@@ -1,6 +1,9 @@
 use opendex::{
     backup, images,
-    state::{McpScope, Message, Project, Provider, ProviderKind, Role, Rule, Store, Thread},
+    state::{
+        AnthropicAuth, McpScope, Message, Project, Provider, ProviderKind, Role, Rule, Store,
+        Thread,
+    },
     web::Config,
 };
 use serde_json::json;
@@ -34,6 +37,13 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
                 name: "Login metadata".into(),
                 kind: ProviderKind::ChatGptAccount,
                 endpoint: String::new(),
+                ..Provider::local()
+            });
+            data.providers.push(Provider {
+                name: "Anthropic account".into(),
+                kind: ProviderKind::Anthropic,
+                anthropic_auth: AnthropicAuth::Account,
+                endpoint: "https://api.anthropic.com/v1".into(),
                 ..Provider::local()
             });
             data.servers.push(serde_json::from_value(json!({
@@ -85,7 +95,10 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
 
     let (archive, checksum) = backup::open(&path, passphrase.into(), None).unwrap();
     let preview = archive.preview(checksum);
-    assert_eq!(preview.providers, ["Backup endpoint", "Login metadata"]);
+    assert_eq!(
+        preview.providers,
+        ["Backup endpoint", "Login metadata", "Anthropic account"]
+    );
     assert!(preview.has_chatgpt_connection);
     assert_eq!(preview.mcp_servers, ["MCP fixture"]);
     assert_eq!(preview.web_search, Some("SearXNG"));
@@ -109,6 +122,8 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     );
     assert_eq!(restored.active_thread, Some(thread_id));
     assert_eq!(restored.providers[0].models, ["pinned-model"]);
+    assert_eq!(restored.providers[2].kind, ProviderKind::Anthropic);
+    assert_eq!(restored.providers[2].anthropic_auth, AnthropicAuth::Account);
     assert_eq!(
         restored.servers[0].tool_rule(Rule::Allow, "fixture"),
         Rule::Deny
