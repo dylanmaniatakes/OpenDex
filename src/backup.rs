@@ -1,7 +1,7 @@
 //! Encrypted, versioned settings archives. Account sessions remain owned by their provider.
 
 use crate::{
-    agent, images,
+    agent, codex, images,
     state::{
         Appearance, Data, McpScope, Permissions, Profile, Project, Provider, ProviderKind, Server,
         Store, Transport, delete_secret, read_secret, write_secret,
@@ -59,6 +59,8 @@ pub struct Archive {
     appearance: Appearance,
     instructions: String,
     codex_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chatgpt_session: Option<ArchiveKey>,
 }
 
 #[derive(Serialize)]
@@ -79,6 +81,7 @@ pub struct Preview {
     pub local_servers: Vec<String>,
     pub projects: Vec<ProjectPreview>,
     pub has_chatgpt_connection: bool,
+    pub has_chatgpt_session: bool,
     pub permission_profile: Profile,
     pub codex_path: String,
 }
@@ -89,7 +92,7 @@ pub struct RestoreResult {
 }
 
 impl Archive {
-    fn capture(data: &Data) -> Result<Self> {
+    fn capture(data: &Data, home: &Path) -> Result<Self> {
         let providers = data
             .providers
             .iter()
@@ -125,6 +128,15 @@ impl Archive {
             })
             .collect::<Result<_>>()?;
         Ok(Self {
+            chatgpt_session: if data
+                .providers
+                .iter()
+                .any(|item| item.kind == ProviderKind::ChatGptAccount)
+            {
+                read_codex_session(home)?.map(|secret| ArchiveKey(secret.to_string()))
+            } else {
+                None
+            },
             format: FORMAT.into(),
             version: SCHEMA_VERSION,
             providers,
@@ -148,6 +160,15 @@ impl Archive {
             self.version == SCHEMA_VERSION,
             "This backup uses an unsupported OpenDex version."
         );
+        if let Some(session) = &self.chatgpt_session {
+            validate_codex_session(&session.0)?;
+            ensure!(
+                self.providers
+                    .iter()
+                    .any(|item| item.settings.kind == ProviderKind::ChatGptAccount),
+                "The backup contains a session without a ChatGPT connection."
+            );
+        }
         let mut ids = HashSet::new();
         let mut account = false;
         for provider in &mut self.providers {
@@ -235,6 +256,7 @@ impl Archive {
                     available: project.root.is_absolute() && project.root.is_dir(),
                 })
                 .collect(),
+            has_chatgpt_session: self.chatgpt_session.is_some(),
             has_chatgpt_connection: self
                 .providers
                 .iter()
@@ -259,6 +281,11 @@ impl Archive {
                 .context("A project to remap is missing from the backup.")?;
             project.root = agent::checked_root(&path)?;
         }
+        let session = self.chatgpt_session.take();
+        let mut session_swap = session
+            .as_ref()
+            .map(|session| SessionSwap::stage(&store.codex_home(), &session.0))
+            .transpose()?;
         let mut staged = StagedKeys::default();
         let previous = store.change(|data| {
             let previous: Vec<_> = data
@@ -284,6 +311,9 @@ impl Archive {
             self.apply(data);
             Ok(previous)
         })?;
+        if let Some(swap) = &mut session_swap {
+            swap.committed = true;
+        }
         staged.0.clear();
         let obsolete_keys_remaining = previous
             .into_iter()
@@ -378,13 +408,87 @@ impl Drop for StagedKeys {
     }
 }
 
+fn validate_codex_session(raw: &str) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).context("The saved ChatGPT session is not valid JSON.")?;
+    ensure!(
+        ["access_token", "refresh_token"]
+            .iter()
+            .all(|name| value["tokens"][name]
+                .as_str()
+                .is_some_and(|token| !token.is_empty())),
+        "The saved ChatGPT session is missing its access or refresh token."
+    );
+    Ok(())
+}
+
+fn read_codex_session(home: &Path) -> Result<Option<Zeroizing<String>>> {
+    // Windows defaults to Codex's encrypted-file backend. Its portable export
+    // requires that backend's format and master-key handling.
+    if cfg!(target_os = "windows") {
+        return Ok(None);
+    }
+    match codex::credential_entry(home)?.get_password() {
+        Ok(raw) => {
+            let raw = Zeroizing::new(raw);
+            validate_codex_session(&raw)?;
+            Ok(Some(raw))
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(error)
+            .context("Could not read OpenDex's ChatGPT session from the system credential store."),
+    }
+}
+
+// Restore the previous session if saving workspace settings fails after staging.
+struct SessionSwap {
+    entry: keyring::Entry,
+    previous: Option<Zeroizing<String>>,
+    committed: bool,
+}
+impl SessionSwap {
+    fn stage(home: &Path, session: &str) -> Result<Self> {
+        ensure!(
+            !cfg!(target_os = "windows"),
+            "ChatGPT session restore currently supports Codex's direct keyring backend on macOS and Linux. Sign in on this computer instead."
+        );
+        validate_codex_session(session)?;
+        let entry = codex::credential_entry(home)?;
+        let previous = match entry.get_password() {
+            Ok(raw) => Some(Zeroizing::new(raw)),
+            Err(keyring::Error::NoEntry) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let swap = Self {
+            entry,
+            previous,
+            committed: false,
+        };
+        swap.entry
+            .set_password(session)
+            .context("Could not restore the ChatGPT session.")?;
+        Ok(swap)
+    }
+}
+impl Drop for SessionSwap {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Some(previous) = &self.previous {
+                let _ = self.entry.set_password(previous);
+            } else {
+                let _ = self.entry.delete_credential();
+            }
+        }
+    }
+}
+
 pub fn export(store: &Store, path: &Path, password: String) -> Result<()> {
     let password = Zeroizing::new(password);
     ensure!(
         password.chars().count() >= 12 && !password.trim().is_empty(),
         "Use a backup passphrase of at least 12 characters."
     );
-    let archive = store.inspect(Archive::capture)?;
+    let archive = store.inspect(|data| Archive::capture(data, &store.codex_home()))?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

@@ -375,3 +375,18 @@ impl Bridge {
         }
     }
 }
+
+/// Direct OS-keyring format used by Codex 0.151.0. Only the dedicated
+/// OpenDex home is passed here, never the user's terminal Codex home.
+/// https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/login/src/auth/storage.rs
+pub fn credential_entry(home: &Path) -> Result<keyring::Entry> {
+    use sha2::{Digest, Sha256};
+    std::fs::create_dir_all(home)?;
+    let canonical = home.canonicalize()?;
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let hex = format!("{digest:x}");
+    Ok(keyring::Entry::new(
+        "Codex Auth",
+        &format!("cli|{}", &hex[..16]),
+    )?)
+}

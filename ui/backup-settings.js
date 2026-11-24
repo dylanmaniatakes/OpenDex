@@ -93,7 +93,7 @@ function restoreForm(api, section, run, permissionName, onRestored) {
     preview.replaceChildren(el('div', { class: 'backup-preview' },
       el('h4', {}, 'Ready to restore'),
       el('p', { class: 'muted' }, 'Restoring replaces saved providers, MCP configuration, web search, image preferences, permissions, appearance, and global instructions. Your current conversations and project links are kept.'),
-      info.has_chatgpt_connection && el('p', { class: 'muted' }, 'Sign in again on a new machine under Providers → ChatGPT Account.'),
+      info.has_chatgpt_connection && el('p', { class: 'muted' }, info.has_chatgpt_session ? 'Includes a ChatGPT session. Restoring replaces the session in OpenDex’s dedicated Codex credential entry.' : 'No ChatGPT session is included. Sign in again under Providers → ChatGPT Account.'),
       showNames('Providers', info.providers),
       showNames('MCP servers', info.mcp_servers),
       info.web_search && el('p', {}, 'Web search ', el('strong', {}, info.web_search)),

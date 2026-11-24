@@ -156,6 +156,16 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
             Ok(())
         })
         .unwrap();
+    let chatgpt_session = json!({"tokens":{"access_token":"chatgpt-access-fixture","refresh_token":"chatgpt-refresh-fixture","account_id":"fixture-account"},"OPENAI_API_KEY":null}).to_string();
+    opendex::codex::credential_entry(&source.codex_home())
+        .unwrap()
+        .set_password(&chatgpt_session)
+        .unwrap();
+    let previous_session = json!({"tokens":{"access_token":"destination-access","refresh_token":"destination-refresh"}}).to_string();
+    opendex::codex::credential_entry(&destination.codex_home())
+        .unwrap()
+        .set_password(&previous_session)
+        .unwrap();
     backup::export(&source, &path, passphrase.into()).unwrap();
     let mut ciphertext = fs::read(&path).unwrap();
     assert!(ciphertext.starts_with(b"age-encryption.org/v1\n"));
@@ -164,6 +174,8 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
         "fixture-access",
         "fixture-refresh",
         "fixture-mcp-key",
+        "chatgpt-access-fixture",
+        "chatgpt-refresh-fixture",
     ] {
         assert!(
             !ciphertext
@@ -180,22 +192,51 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     assert!(backup::open(&path, "incorrect".into(), None).is_err());
 
     let (archive, checksum) = backup::open(&path, passphrase.into(), None).unwrap();
+    let mut legacy = serde_json::to_value(&archive).unwrap();
+    legacy.as_object_mut().unwrap().remove("chatgpt_session");
+    let legacy: backup::Archive = serde_json::from_value(legacy).unwrap();
+    assert!(!legacy.preview(checksum).has_chatgpt_session);
     let preview = archive.preview(checksum);
     assert_eq!(
         preview.providers,
         ["Backup endpoint", "Login metadata", "Anthropic account"]
     );
     assert!(preview.has_chatgpt_connection);
+    assert!(preview.has_chatgpt_session);
     assert_eq!(preview.mcp_servers, ["MCP fixture"]);
     assert_eq!(preview.web_search, Some("SearXNG"));
     assert_eq!(preview.image_model.as_deref(), Some("image-fixture"));
     assert!(!preview.projects[0].available);
     assert!(destination.snapshot().instructions.is_empty());
+    let failing = Store::open(&folder.path().join("failing")).unwrap();
+    let failing_entry = opendex::codex::credential_entry(&failing.codex_home()).unwrap();
+    failing_entry.set_password(&previous_session).unwrap();
+    let failing_path = folder.path().join("failing/workspace.json");
+    fs::rename(&failing_path, failing_path.with_extension("original")).unwrap();
+    fs::create_dir(&failing_path).unwrap();
+    let copy: backup::Archive =
+        serde_json::from_value(serde_json::to_value(&archive).unwrap()).unwrap();
+    assert!(copy.restore(&failing, HashMap::new()).is_err());
+    assert_eq!(failing_entry.get_password().unwrap(), previous_session);
     let mapped = folder.path().join("mapped");
     fs::create_dir(&mapped).unwrap();
     archive
         .restore(&destination, HashMap::from([(project_id, mapped.clone())]))
         .unwrap();
+    assert_eq!(
+        opendex::codex::credential_entry(&destination.codex_home())
+            .unwrap()
+            .get_password()
+            .unwrap(),
+        chatgpt_session
+    );
+    assert_eq!(
+        opendex::codex::credential_entry(&source.codex_home())
+            .unwrap()
+            .get_password()
+            .unwrap(),
+        chatgpt_session
+    );
     let restored = destination.snapshot();
     assert_eq!(restored.projects[0].root, mapped.canonicalize().unwrap());
     assert_eq!(restored.threads.len(), 1);

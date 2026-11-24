@@ -937,6 +937,13 @@ impl Store {
         })
     }
 
+    pub fn codex_home(&self) -> PathBuf {
+        self.path
+            .parent()
+            .expect("workspace directory")
+            .join("codex")
+    }
+
     pub fn snapshot(&self) -> Data {
         self.data.lock().expect("store lock").clone()
     }

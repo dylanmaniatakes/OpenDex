@@ -446,6 +446,10 @@ async fn export_settings_backup(app: AppState<'_>, path: PathBuf, password: Stri
                 .backup_lock
                 .try_lock()
                 .context("A backup operation is already in progress.")?;
+            let _account_lock = app
+                .codex_lock
+                .try_lock()
+                .context("The ChatGPT connection is busy.")?;
             let app = Arc::clone(&app);
             tauri::async_runtime::spawn_blocking(move || {
                 backup::export(&app.store, &path, password)
@@ -492,6 +496,10 @@ async fn restore_settings_backup(
                 .backup_lock
                 .try_lock()
                 .context("A backup operation is already in progress.")?;
+            let _account_lock = app
+                .codex_lock
+                .try_lock()
+                .context("The ChatGPT connection is busy.")?;
             let app = Arc::clone(&app);
             tauri::async_runtime::spawn_blocking(move || {
                 let (archive, _) = backup::open(&path, password, Some(checksum))?;
