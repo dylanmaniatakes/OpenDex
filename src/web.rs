@@ -241,9 +241,22 @@ async fn response(request: RequestBuilder, searxng: bool) -> Result<Value> {
             reqwest::StatusCode::TOO_MANY_REQUESTS => bail!(
                 "SearXNG returned HTTP 429. The instance rate-limited this computer. Retry later or check its limiter settings."
             ),
-            status if status.is_redirection() => bail!(
-                "SearXNG redirected the request (HTTP {status}). Enter the final search URL, including its reverse-proxy path."
-            ),
+            status if status.is_redirection() => {
+                let location = response
+                    .headers()
+                    .get(&reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let hint = if location.is_empty() {
+                    String::new()
+                } else {
+                    format!(" The server sent Location: {location}.")
+                };
+                bail!(
+                    "SearXNG redirected the request (HTTP {status}). Enter the final search URL, including its reverse-proxy path.{hint}"
+                );
+            }
             _ => {}
         }
     }
@@ -292,12 +305,17 @@ mod tests {
 
     #[tokio::test]
     async fn searxng_errors_explain_instance_and_proxy_failures() {
-        for (status, body, expected) in [
-            ("401 Unauthorized", "", "requires authentication"),
-            ("403 Forbidden", "", "search.formats"),
-            ("429 Too Many Requests", "", "rate-limited"),
-            ("302 Found", "", "final search URL"),
-            ("200 OK", "<html>Sign in</html>", "did not return JSON"),
+        for (status, body, expected, location) in [
+            ("401 Unauthorized", "", "requires authentication", ""),
+            ("403 Forbidden", "", "search.formats", ""),
+            ("429 Too Many Requests", "", "rate-limited", ""),
+            (
+                "302 Found",
+                "",
+                "final search URL",
+                "/search?q=OpenDex&format=json",
+            ),
+            ("200 OK", "<html>Sign in</html>", "did not return JSON", ""),
         ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/search", listener.local_addr().unwrap());
@@ -311,16 +329,25 @@ mod tests {
                         break;
                     }
                 }
+                let headers = if location.is_empty() {
+                    String::new()
+                } else {
+                    format!("Location: {location}\r\n")
+                };
                 write!(
                     stream,
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .unwrap();
             });
             let client = providers::client().unwrap();
             let error = response(client.get(url), true).await.unwrap_err();
-            assert!(error.to_string().contains(expected), "{error:#}");
+            let message = error.to_string();
+            assert!(message.contains(expected), "{message:#}");
+            if !location.is_empty() {
+                assert!(message.contains(location), "{message:#}");
+            }
             server.join().unwrap();
         }
     }
