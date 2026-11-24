@@ -9,4 +9,5 @@ find dist -type f -name '._*' -delete 2>/dev/null || true
 
 bash scripts/check.sh
 bash scripts/bundle-macos.sh release
+find dist -type f -name '._*' -delete 2>/dev/null || true
 python3 scripts/verify-release.py
