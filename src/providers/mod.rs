@@ -367,8 +367,7 @@ pub async fn search_ollama(client: &Client, query: &str) -> Result<Vec<String>> 
         .context("Ollama search URL is unavailable.")?;
     url.query_pairs_mut().append_pair("q", query);
     let response = checked(client.get(url).send().await?).await?;
-    let body = response
-        .text()
+    let body = bounded_text(response, MAX_REMOTE_CATALOG_BYTES)
         .await
         .context("Ollama search returned unreadable content.")?;
     let models = parse_ollama_search(&body);
@@ -377,6 +376,26 @@ pub async fn search_ollama(client: &Client, query: &str) -> Result<Vec<String>> 
         "Ollama returned no matching models. Try a shorter or different search term."
     );
     Ok(models)
+}
+
+const MAX_REMOTE_CATALOG_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) async fn bounded_text(mut response: Response, limit: usize) -> Result<String> {
+    ensure!(
+        response
+            .content_length()
+            .is_none_or(|size| size <= limit as u64),
+        "The remote catalog response exceeds the size limit."
+    );
+    let mut body = Vec::with_capacity(limit.min(256 * 1024));
+    while let Some(chunk) = response.chunk().await? {
+        ensure!(
+            body.len() + chunk.len() <= limit,
+            "The remote catalog response exceeds the size limit."
+        );
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 #[cfg(test)]
