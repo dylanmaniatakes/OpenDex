@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>OpenDex</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div id="app-frame">
+    <aside id="sidebar" aria-label="Workspace navigation">
+      <div class="brand"><span class="brand-symbol" aria-hidden="true"></span><span>OpenDex</span></div>
+      <nav id="modes" aria-label="App mode"></nav>
+      <div class="history-heading"><span id="history-label">Conversations</span><button id="new-thread" class="icon-button" title="New conversation" aria-label="New conversation"></button></div>
+      <div id="history"></div>
+      <div class="sidebar-end">
+        <button id="settings-button" class="settings-button"></button>
+        <div class="app-state"><span class="online-dot"></span><span id="provider-summary">Starting OpenDex</span></div>
+      </div>
+    </aside>
+    <main id="main">
+      <header class="toolbar">
+        <div class="toolbar-title">
+          <button id="toggle-sidebar" class="icon-button" aria-label="Toggle sidebar" title="Toggle sidebar"></button>
+          <span id="mode-title">Model Chat</span>
+          <span id="thread-title"></span>
+        </div>
+        <div id="thread-actions"></div>
+      </header>
+      <section id="stage" aria-label="Conversation">
+        <div id="welcome"></div>
+        <div id="timeline" class="content-width" aria-live="off"></div>
+      </section>
+      <section class="composer-wrap">
+        <div id="run-status" class="content-width" role="status"></div>
+        <form id="composer" class="content-width">
+          <div id="attachment-row" hidden></div>
+          <label class="sr-only" for="prompt">Message</label>
+          <textarea id="prompt" name="prompt" rows="2" placeholder="Write a message…" spellcheck="true"></textarea>
+          <div class="composer-controls">
+            <div class="model-controls">
+              <button type="button" id="attach" class="icon-button" title="Attach a file" aria-label="Attach a file"></button>
+              <span class="control-divider"></span>
+              <label class="select-control"><span class="sr-only">Provider</span><select id="provider-select"></select></label>
+              <label class="select-control model-select"><span class="sr-only">Model</span><select id="model-select"></select></label>
+            </div>
+            <div class="send-controls">
+              <span id="permission-label"></span>
+              <button type="submit" id="send" class="send" title="Send message" aria-label="Send message"></button>
+            </div>
+          </div>
+        </form>
+        <div id="composer-footer" class="content-width"></div>
+      </section>
+    </main>
+  </div>
+  <dialog id="settings" aria-labelledby="settings-title">
+    <div class="settings-shell">
+      <aside class="settings-nav">
+        <h2 id="settings-title">Settings</h2>
+        <nav id="settings-tabs" aria-label="Settings sections"></nav>
+      </aside>
+      <section class="settings-section">
+        <button id="close-settings" class="icon-button close" aria-label="Close settings" title="Close settings"></button>
+        <div id="settings-content"></div>
+      </section>
+    </div>
+  </dialog>
+  <dialog id="details" aria-labelledby="details-title">
+    <div class="details-shell">
+      <header><h2 id="details-title"></h2><button id="close-details" class="icon-button" aria-label="Close" title="Close"></button></header>
+      <div id="details-content"></div>
+    </div>
+  </dialog>
+  <div id="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>

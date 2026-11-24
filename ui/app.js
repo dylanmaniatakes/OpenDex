@@ -1,0 +1,725 @@
+import { $, button, el, field, markdown } from './dom.js';
+import { icon } from './icons.js';
+import { settingsPanel, permissionName } from './settings.js';
+
+const tauri = window.__TAURI__;
+const invoke = (command, args = {}) => tauri.core.invoke(command, args);
+const io = {
+  open: (options) => invoke('plugin:dialog|open', { options }),
+  save: (options) => invoke('plugin:dialog|save', { options }),
+};
+const modes = {
+  chat: { label: 'Model Chat', glyph: 'chat', placeholder: 'Write a message…', headline: 'What’s on your mind?' },
+  agent: { label: 'Code Agent', glyph: 'code', placeholder: 'Describe a change or ask about your project…', headline: 'What are we building?' },
+};
+
+let data;
+let active;
+let mode = 'chat';
+let sidebarVisible = true;
+const turns = new Map();
+const drafts = new Map();
+const collapsedProjects = new Set();
+const lastThreadByMode = new Map();
+const colorPreference = window.matchMedia('(prefers-color-scheme: dark)');
+let liveAppearance;
+let lastRender;
+let unreadApprovals = new Map();
+let navQueue = Promise.resolve();
+
+const current = () => data?.threads.find((thread) => thread.id === active);
+const live = () => turns.get(active);
+const draftOf = (id = active) => {
+  if (!drafts.has(id)) drafts.set(id, { text: '', attachment: null });
+  return drafts.get(id);
+};
+
+function toast(message, error = false) {
+  const item = el('div', { class: 'toast' + (error ? ' error' : '') },
+    icon(error ? 'close' : 'check', 16), el('span', {}, message),
+    button('Dismiss', () => item.remove(), { glyph: 'close', onlyIcon: true, style: 'icon-button small' }));
+  $('toasts').append(item);
+  setTimeout(() => item.remove(), error ? 11000 : 4000);
+}
+
+async function copy(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const area = el('textarea', { class: 'clipboard-buffer' }, text);
+    const container = $('details').open ? $('details') : $('settings').open ? $('settings') : document.body;
+    container.append(area); area.select();
+    const copied = document.execCommand('copy');
+    area.remove();
+    if (!copied) { toast('Clipboard access failed.', true); return; }
+  }
+  toast('Copied to clipboard.');
+}
+
+function previewAppearance(appearance) {
+  liveAppearance = appearance;
+  const root = document.documentElement;
+  root.dataset.theme = appearance.theme === 'system' ? colorPreference.matches ? 'dark' : 'light' : appearance.theme;
+  root.dataset.density = appearance.density;
+  root.dataset.font = appearance.font;
+  root.dataset.motion = appearance.motion;
+  root.style.setProperty('--accent', appearance.accent);
+  const [r, g, b] = appearance.accent.slice(1).match(/../g).map((hex) => Number.parseInt(hex, 16) / 255);
+  const linear = (channel) => channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+  const lightness = .2126 * linear(r) + .7152 * linear(g) + .0722 * linear(b);
+  root.style.setProperty('--accent-ink', lightness > .21 ? '#101814' : '#fff');
+  root.style.setProperty('--scale', appearance.font_scale + '%');
+  root.style.setProperty('--content-width', appearance.width + 'px');
+  root.style.setProperty('--sidebar-width', appearance.sidebar + 'px');
+  root.style.setProperty('--radius', appearance.radius + 'px');
+}
+
+async function refresh() {
+  data = await invoke('snapshot');
+  if (!current()) active = data.active_thread ?? data.threads.at(-1)?.id;
+  previewAppearance(data.appearance);
+  render();
+}
+
+async function savePreferences(changes) {
+  const next = { ...data, ...changes };
+  await invoke('save_settings', {
+    appearance: next.appearance, permissions: next.permissions,
+    codexPath: next.codex_path, instructions: next.instructions,
+  });
+  await refresh();
+}
+
+const settings = settingsPanel({ data: () => data, invoke, refresh, savePreferences, previewAppearance, toast, copy, confirm });
+
+function showDetails(title, content) {
+  $('details-title').textContent = title;
+  $('details-content').replaceChildren(content);
+  if (!$('details').open) $('details').showModal();
+}
+
+function confirm(title, text, action, label = 'Remove') {
+  const actionButton = button(label, async () => {
+    actionButton.disabled = true;
+    $('details').close();
+    try { await action(); }
+    catch (error) { toast(String(error), true); }
+  }, { style: label === 'Remove' ? 'button danger' : 'button primary' });
+  showDetails(title, el('div', { class: 'details-form' },
+    el('p', { class: 'preserve' }, text),
+    el('div', { class: 'form-actions right' },
+      button('Cancel', () => $('details').close()), actionButton)));
+}
+
+function transient(operation) {
+  return async (...args) => {
+    try { await operation(...args); }
+    catch (error) { toast(String(error), true); }
+  };
+}
+
+function updateThread(thread) {
+  const index = data.threads.findIndex((value) => value.id === thread.id);
+  if (index >= 0) data.threads[index] = thread;
+  else data.threads.push(thread);
+  render();
+}
+
+function queueNavigation(operation) {
+  navQueue = navQueue.then(operation).catch((error) => toast(String(error), true));
+  return navQueue;
+}
+
+async function makeThread(nextMode = mode, project = nextMode === 'agent' ? current()?.project_id : null) {
+  const thread = await invoke('new_thread', { mode: nextMode, project: project ?? null });
+  if (project) collapsedProjects.delete(project);
+  active = thread.id;
+  mode = thread.mode;
+  lastThreadByMode.set(mode, thread.id);
+  updateThread(thread);
+  $('prompt').focus();
+}
+
+async function openThread(id) {
+  await invoke('set_active', { id });
+  active = id;
+  mode = current().mode;
+  lastThreadByMode.set(mode, id);
+  render();
+  scrollDown(true);
+}
+
+function conversationButton(thread, nested = false) {
+  return el('button', {
+    type: 'button', title: thread.title, 'aria-current': thread.id === active ? 'page' : null,
+    class: 'history-item' + (nested ? ' nested' : '') + (thread.id === active ? ' current' : ''),
+    onclick: () => queueNavigation(() => openThread(thread.id)),
+  }, icon(thread.mode === 'agent' ? 'code' : 'chat', 15), el('span', { class: 'history-name' }, thread.title),
+  unreadApprovals.has(thread.id) ? el('span', { class: 'history-alert', title: 'Approval required' }) :
+    turns.has(thread.id) ? el('span', { class: 'history-running', title: 'Generating' }) : null);
+}
+
+function projectGroup(project, threads) {
+  const expanded = !collapsedProjects.has(project.id);
+  const currentProject = current()?.project_id === project.id;
+  const nestedId = 'project-threads-' + project.id;
+  const toggle = el('button', {
+    type: 'button', class: 'project-toggle', title: project.root,
+    'aria-expanded': String(expanded), 'aria-controls': nestedId,
+    onclick: () => {
+      if (expanded) collapsedProjects.add(project.id);
+      else collapsedProjects.delete(project.id);
+      navigation();
+    },
+  }, icon('chevron', 13), icon('folder', 17), el('span', {}, project.name));
+  return el('section', { class: 'project-group' + (currentProject ? ' current-project' : ''), 'aria-label': project.name },
+    el('div', { class: 'project-heading' }, toggle,
+      button('New thread in ' + project.name, () => queueNavigation(() => makeThread('agent', project.id)), {
+        glyph: 'plus', style: 'icon-button small', onlyIcon: true,
+      })),
+    el('div', { id: nestedId, class: 'project-threads', hidden: !expanded },
+      threads.length ? threads.map((thread) => conversationButton(thread, true)) : el('p', { class: 'muted' }, 'No threads yet.')));
+}
+
+function showModeOptions(dropdown, open) {
+  dropdown.classList.toggle('open', open);
+  dropdown.querySelector('.mode-current').setAttribute('aria-expanded', String(open));
+  dropdown.querySelector('.mode-options').hidden = !open;
+}
+
+function modeDropdown() {
+  const toggle = el('button', {
+    type: 'button', class: 'mode-current', 'aria-label': 'Switch mode, current ' + modes[mode].label,
+    'aria-expanded': 'false', 'aria-controls': 'mode-options',
+    onclick: () => showModeOptions(dropdown, !dropdown.classList.contains('open')),
+  }, icon(modes[mode].glyph, 19), el('span', {}, modes[mode].label), icon('chevron', 15));
+  const entries = Object.entries(modes).map(([key, item]) => el('button', {
+    type: 'button', class: 'mode-option' + (mode === key ? ' selected' : ''),
+    'aria-current': mode === key ? 'page' : null,
+    onclick: () => {
+      showModeOptions(dropdown, false);
+      queueNavigation(async () => {
+        if (mode === key) return;
+        const target = data.threads.find((thread) => thread.id === lastThreadByMode.get(key))
+          ?? data.threads.findLast((thread) => thread.mode === key);
+        if (target) await openThread(target.id);
+        else await makeThread(key, null);
+      });
+    },
+  }, icon(item.glyph, 17), el('span', {}, item.label), mode === key && icon('check', 15)));
+  const dropdown = el('div', { class: 'mode-dropdown', id: 'mode-dropdown' }, toggle,
+    el('div', { class: 'mode-options', id: 'mode-options', hidden: true }, entries));
+  dropdown.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && dropdown.classList.contains('open')) {
+      event.preventDefault();
+      showModeOptions(dropdown, false);
+      toggle.focus();
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      showModeOptions(dropdown, true);
+      const index = entries.indexOf(document.activeElement);
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
+      const next = index === -1 ? (direction === 1 ? 0 : entries.length - 1) :
+        (index + entries.length + direction) % entries.length;
+      entries[next].focus();
+    }
+  });
+  return dropdown;
+}
+
+function navigation() {
+  $('modes').replaceChildren(modeDropdown());
+  $('history-label').textContent = mode === 'agent' ? 'Projects' : 'Conversations';
+  $('new-thread').title = mode === 'agent' ? 'Add project' : 'New conversation';
+  $('new-thread').setAttribute('aria-label', $('new-thread').title);
+
+  const visible = data.threads.filter((thread) => thread.mode === mode).toReversed();
+  const items = mode === 'chat' ? visible.map((thread) => conversationButton(thread)) : [
+    ...data.projects.map((project) => projectGroup(project, visible.filter((thread) => thread.project_id === project.id))),
+    ...visible.some((thread) => !thread.project_id) ? [
+      el('div', { class: 'unassigned-heading' }, 'No project'),
+      ...visible.filter((thread) => !thread.project_id).map((thread) => conversationButton(thread)),
+    ] : [],
+  ];
+  $('history').replaceChildren(...items);
+  if (!items.length) $('history').append(el('p', { class: 'muted' }, mode === 'agent' ? 'No projects yet.' : 'No conversations yet.'));
+  $('provider-summary').textContent = data.providers.length
+    ? `${data.providers.length} provider${data.providers.length === 1 ? '' : 's'} configured`
+    : 'Add a provider';
+}
+
+const addProject = transient(async () => {
+  const path = await io.open({ directory: true, multiple: false, title: 'Add a project folder' });
+  if (!path) return;
+  const thread = await invoke('open_project', { path });
+  active = thread.id;
+  mode = thread.mode;
+  lastThreadByMode.set(mode, thread.id);
+  collapsedProjects.delete(thread.project_id);
+  await refresh();
+  $('prompt').focus();
+});
+
+const chooseProject = transient(async () => {
+  const id = active;
+  async function setProject(changes) {
+    const thread = await invoke('edit_thread', { id, changes });
+    collapsedProjects.delete(thread.project_id);
+    if ($('details').open) $('details').close();
+    await refresh();
+  }
+  const addFolder = transient(async () => {
+    const workspace = await io.open({ directory: true, multiple: false, title: 'Choose a project folder' });
+    if (workspace) await setProject({ workspace });
+  });
+  if (!data.projects.length) {
+    await addFolder();
+    return;
+  }
+  showDetails('Choose a project', el('div', { class: 'details-form' },
+    el('div', { class: 'setup-model-list' },
+      data.projects.map((project) => button(project.name, transient(() => setProject({ project: project.id })), {
+        glyph: 'folder', title: project.root, style: 'catalog-result',
+      }))),
+    el('div', { class: 'form-actions' }, button('Add project folder', addFolder, { glyph: 'plus', style: 'button primary' }))));
+});
+
+const review = transient(async () => {
+  const id = active;
+  const staged = el('div', { class: 'details-form' }, el('p', { class: 'muted' }, 'Reading Git status…'));
+  showDetails('Project changes', staged);
+  let diff;
+  try { diff = await invoke('review_changes', { id }); }
+  catch (error) { staged.replaceChildren(el('p', { class: 'status-error preserve' }, String(error))); return; }
+  const output = el('pre', { class: 'git-diff' });
+  output.replaceChildren(...diff.split('\n').map((line) => el('span', {
+    class: line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : '',
+  }, line + '\n')));
+  staged.replaceChildren(output, el('div', { class: 'form-actions right' },
+    button('Copy diff', () => copy(diff), { glyph: 'copy' })));
+});
+
+function worktree() {
+  const id = active;
+  let location = '';
+  const branch = el('input', { type: 'text', required: true, placeholder: 'feature/my-change', spellcheck: 'false' });
+  const path = el('span', { class: 'muted' }, 'No folder selected');
+  const status = el('span', { class: 'form-status', role: 'status' });
+  const submit = el('button', { type: 'submit', class: 'button primary' }, 'Create worktree');
+  showDetails('New Git worktree', el('form', { class: 'details-form', onsubmit: transient(async (event) => {
+    event.preventDefault();
+    if (!location) { status.textContent = 'Choose a new worktree folder.'; return; }
+    submit.disabled = true;
+    status.textContent = 'Creating worktree…';
+    try {
+      updateThread(await invoke('add_worktree', { id, target: location, branch: branch.value }));
+      $('details').close(); toast('Worktree ready for this conversation.');
+    } catch (error) { status.textContent = String(error); }
+    finally { submit.disabled = false; }
+  }) }, el('p', { class: 'muted' }, 'Create a branch from the current project’s HEAD in a separate folder. This conversation will use that folder.'),
+  field('Branch name', branch),
+  el('div', { class: 'inline-form' }, button('Choose new folder path', transient(async () => {
+    const result = await io.save({ title: 'Choose the new worktree path', defaultPath: 'opendex-worktree' });
+    if (result) { location = result; path.textContent = result; }
+  }), { glyph: 'folder' }), path),
+  el('div', { class: 'form-actions' }, submit, status)));
+}
+
+function threadMenu(thread) {
+  const id = thread.id;
+  const busy = turns.has(id);
+  const title = el('input', { type: 'text', value: thread.title, required: true, maxlength: 130, 'aria-label': 'Conversation title' });
+  const instructions = el('textarea', { rows: 5, maxlength: 32000 }, thread.instructions);
+  const form = el('form', { class: 'details-form', onsubmit: transient(async (event) => {
+    event.preventDefault();
+    updateThread(await invoke('edit_thread', { id, changes: { title: title.value, instructions: instructions.value } }));
+    $('details').close();
+  }) }, field('Title', title),
+  field('Thread instructions', instructions),
+  el('div', { class: 'form-actions' }, el('button', { type: 'submit', class: 'button primary', disabled: busy }, 'Save conversation'),
+    button('Export Markdown', transient(async () => {
+      const path = await io.save({ title: 'Export conversation', defaultPath: 'conversation.md', filters: [{ name: 'Markdown', extensions: ['md'] }] });
+      if (path) { await invoke('export_thread', { id, path }); toast('Conversation exported.'); }
+    }), { glyph: 'note' }),
+    thread.workspace && button('Clear project', transient(async () => {
+      updateThread(await invoke('edit_thread', { id, changes: { clear_workspace: true } }));
+      $('details').close();
+    }), { disabled: busy }),
+    button('Delete conversation', () => confirm('Delete conversation', 'This deletes the local transcript.', async () => {
+      await invoke('remove_thread', { id }); drafts.delete(id);
+      if (active === id) active = null;
+      await refresh();
+      if (current()) { mode = current().mode; render(); }
+      else await makeThread(mode);
+    }), { style: 'button danger quiet', disabled: busy })));
+  showDetails('Conversation settings', form);
+}
+
+function toolbar(thread) {
+  $('mode-title').textContent = modes[mode].label;
+  $('thread-title').textContent = thread?.messages.length || thread?.title !== 'New conversation' ? thread?.title ?? '' : '';
+  const root = thread?.workspace;
+  $('thread-actions').replaceChildren(
+    ...mode === 'agent' ? [
+      button(root ? root.split(/[\\/]/).at(-1) : 'Choose project', chooseProject, {
+        title: root ?? 'Choose a project folder', glyph: 'folder', style: 'button toolbar-button', disabled: Boolean(live()),
+      }),
+      button('Create worktree', worktree, { glyph: 'branch', onlyIcon: true, style: 'icon-button', disabled: !root || Boolean(live()) }),
+      button('Review changes', review, { glyph: 'diff', onlyIcon: true, style: 'icon-button', disabled: !root }),
+    ] : [],
+    button('Conversation settings', () => threadMenu(thread), { glyph: 'more', onlyIcon: true, style: 'icon-button', disabled: !thread }),
+  );
+}
+
+async function setSelection(thread, provider, model) {
+  if (!thread || !provider) return;
+  const changed = await invoke('edit_thread', { id: thread.id, changes: { selection: { provider, model: model || null } } });
+  updateThread(changed);
+}
+
+function modelPicker(thread) {
+  const provider = data.providers.find((item) => item.id === thread?.provider_id) ?? data.providers[0];
+  const model = provider?.models.includes(thread?.model_id) ? thread.model_id : null;
+  const items = data.providers.map((item) => el('option', { value: item.id }, item.name));
+  $('provider-select').replaceChildren(...(items.length ? items : [el('option', { value: '' }, 'Add provider')]));
+  $('provider-select').value = provider?.id ?? '';
+  $('model-select').replaceChildren(
+    ...model ? [] : [el('option', { value: '' }, provider?.models.length ? 'Choose a model' : 'Add models')],
+    ...(provider?.models ?? []).map((id) => el('option', { value: id }, id)),
+  );
+  $('model-select').value = model ?? '';
+  $('provider-select').disabled = Boolean(live()) || !items.length;
+  $('model-select').disabled = Boolean(live()) || !provider?.models.length;
+  $('permission-label').replaceChildren(...mode === 'agent' ? [
+    button(permissionName(data.permissions.profile), () => settings.open('permissions'), {
+      glyph: 'shield', title: 'Permission profile', style: 'permission-pill',
+    }),
+  ] : []);
+  const empty = !provider || !provider.models.length;
+  $('composer-footer').replaceChildren(
+    ...empty ? [button(provider ? 'Manage models' : 'Add a provider', () => settings.open('providers', provider?.id), { style: 'text-link' })]
+      : [el('span', {}, 'Enter to send'), el('span', { class: 'footer-dot' }),
+        el('span', {}, 'Shift + Enter for a new line')]);
+}
+
+async function findModels(thread, provider) {
+  if (!provider) { settings.open(); return; }
+  if (provider.kind !== 'ollama' || provider.models.length) { settings.open('providers', provider.id); return; }
+  const control = $('find-models');
+  control.disabled = true;
+  control.textContent = 'Looking for local models…';
+  try {
+    const models = await invoke('discover_models', { id: provider.id });
+    if (!models.length) { toast('Ollama is running and has no installed models. Add one in Ollama, then try again.', true); settings.open('providers', provider.id); return; }
+    const list = el('div', { class: 'setup-model-list' }, models.map((id) => button(id, transient(async () => {
+      await invoke('save_provider', { value: { ...provider, models: [...provider.models, id] }, secret: null, forget: false });
+      await refresh();
+      await setSelection(thread, provider.id, id);
+      $('details').close();
+      $('prompt').focus();
+      toast('Local model ready.');
+    }), { style: 'catalog-result', glyph: 'plus' })));
+    showDetails('Choose a local model', el('div', { class: 'details-form' },
+      el('p', { class: 'muted' }, 'Add an installed Ollama model to your picker.'), list));
+  } catch (error) {
+    toast(String(error), true);
+    settings.open('providers', provider.id);
+  } finally {
+    control.disabled = false;
+    control.textContent = 'Find local models';
+  }
+}
+
+function welcome(thread) {
+  const config = modes[mode];
+  const provider = data.providers.find((item) => item.id === thread?.provider_id) ?? data.providers[0];
+  const noModels = !data.providers.some((item) => item.models.length);
+  $('welcome').hidden = Boolean(thread?.messages.length || live()?.stream);
+  if ($('welcome').hidden) return;
+  const action = noModels
+    ? el('button', { type: 'button', id: 'find-models', class: 'button primary',
+      onclick: () => findModels(thread, provider) }, icon('plus', 16), provider?.kind === 'ollama' ? 'Find local models' : 'Add a model')
+    : mode === 'agent' && !thread?.workspace ? button('Choose project', chooseProject, { glyph: 'folder', style: 'button primary' }) : null;
+  const secondary = noModels && button('Provider settings', () => settings.open('providers', provider?.id), { glyph: 'settings' });
+  const description = noModels ? 'Choose a model to start your first conversation.'
+    : mode === 'agent' ? 'Ask about a project, make changes, or review your work.'
+      : 'Start a conversation with a model you’ve connected.';
+  $('welcome').replaceChildren(
+    el('div', { class: 'welcome-mark' }, el('span', { class: 'brand-symbol', 'aria-hidden': 'true' })),
+    el('h1', {}, config.headline), el('p', {}, description),
+    el('div', { class: 'welcome-actions' }, action, secondary),
+  );
+}
+
+function messageCard(message) {
+  const user = message.role === 'user';
+  if (message.role === 'tool') {
+    return el('details', { class: 'tool-result' }, el('summary', {}, icon('terminal', 15), message.tool_label ?? message.tool_name ?? 'Tool result'),
+      el('pre', {}, message.text));
+  }
+  if (!message.text && !message.attachment) return null;
+  const body = user ? el('div', { class: 'user-text' }, message.text) : markdown(message.text, copy);
+  const meta = user ? null : el('div', { class: 'assistant-meta' },
+    el('span', { class: 'brand-symbol tiny', 'aria-hidden': 'true' }),
+    el('span', {}, message.model ?? 'Assistant'),
+    message.incomplete && el('span', { class: 'muted' }, '· Partial response'),
+    button('Copy response', () => copy(message.text), { glyph: 'copy', onlyIcon: true, style: 'icon-button small' }));
+  return el('article', { class: 'message ' + (user ? 'user' : 'assistant') }, meta,
+    el('div', { class: 'message-content' }, body,
+      message.attachment && el('div', { class: 'chip file-chip' }, icon('note', 15), message.attachment.name),
+      message.attachment?.media_type?.startsWith('image/') && el('img', {
+        class: 'preview-image', src: 'data:' + message.attachment.media_type + ';base64,' + message.attachment.text,
+        alt: message.attachment.name, loading: 'lazy',
+      })));
+}
+
+function nearBottom() {
+  const stage = $('stage');
+  return stage.scrollHeight - stage.scrollTop - stage.clientHeight < 110;
+}
+
+function scrollDown(force = false) {
+  if (force || nearBottom()) requestAnimationFrame(() => { $('stage').scrollTop = $('stage').scrollHeight; });
+}
+
+function timeline(thread, forced = false) {
+  const shouldScroll = forced || nearBottom() || lastRender !== thread?.id;
+  lastRender = thread?.id;
+  const turn = live();
+  const items = (thread?.messages ?? []).map(messageCard).filter(Boolean);
+  if (turn?.stream) {
+    items.push(el('article', { class: 'message assistant' },
+      el('div', { class: 'assistant-meta' }, el('span', { class: 'brand-symbol tiny' }), thread.model_id ?? 'Assistant'),
+      el('div', { class: 'stream-text', id: 'stream-text' }, turn.stream)));
+  }
+  $('timeline').replaceChildren(...items);
+  if (shouldScroll) scrollDown(true);
+}
+
+function renderApproval(approval) {
+  if (!approval) return null;
+  return el('div', { class: 'approval-card' },
+    el('div', { class: 'approval-title' }, icon('shield', 18),
+      el('strong', {}, `Allow ${approval.tool}?`), el('span', { class: 'muted' }, approval.source)),
+    el('pre', {}, JSON.stringify(approval.arguments, null, 2)),
+    el('div', { class: 'form-actions right' },
+      button('Deny', transient(() => answerApproval(approval.id, false))),
+      button('Allow once', transient(() => answerApproval(approval.id, true)), { style: 'button primary' })));
+}
+
+async function answerApproval(id, allow) {
+  await invoke('resolve_approval', { id, allow });
+  unreadApprovals.delete(active);
+  render();
+}
+
+function status() {
+  const turn = live();
+  const node = $('run-status');
+  node.replaceChildren();
+  if (turn?.approval) node.append(renderApproval(turn.approval));
+  else if (turn) node.append(el('div', { class: 'live-status' }, el('span', { class: 'pulse' }),
+    turn.notice || (turn.stream ? 'Generating' : 'Waiting for the model')));
+  else if (drafts.get(active)?.error) node.append(el('p', { class: 'status-error' }, drafts.get(active).error));
+  else if (drafts.get(active)?.notice) node.append(el('p', { class: 'live-status' }, drafts.get(active).notice));
+}
+
+function attachment() {
+  const item = draftOf().attachment;
+  $('attachment-row').hidden = !item;
+  $('attachment-row').replaceChildren(...item ? [el('div', { class: 'chip file-chip' }, icon('note', 15), item.name,
+    button('Remove attachment', () => { draftOf().attachment = null; attachment(); }, { glyph: 'close', onlyIcon: true, style: 'icon-button small' }))] : []);
+}
+
+function composer(thread) {
+  const busy = Boolean(live());
+  if ($('prompt').dataset.thread !== thread?.id) {
+    $('prompt').value = draftOf().text;
+    $('prompt').dataset.thread = thread?.id ?? '';
+  }
+  $('prompt').placeholder = modes[mode].placeholder;
+  $('prompt').disabled = busy || !thread;
+  $('attach').disabled = busy || !thread;
+  $('send').replaceChildren(icon(busy ? 'stop' : 'send', 21));
+  $('send').title = busy ? 'Stop response' : 'Send message';
+  $('send').setAttribute('aria-label', $('send').title);
+  $('send').disabled = !thread;
+  attachment();
+  modelPicker(thread);
+  status();
+}
+
+function render() {
+  if (!data) return;
+  const thread = current();
+  navigation();
+  toolbar(thread);
+  welcome(thread);
+  timeline(thread);
+  composer(thread);
+}
+
+async function send(event) {
+  event?.preventDefault();
+  const thread = current();
+  if (!thread) return;
+  if (live()) { await invoke('stop_turn', { id: thread.id }); return; }
+  const draft = draftOf();
+  if (!draft.text.trim() && !draft.attachment) return;
+  const provider = data.providers.find((item) => item.id === thread.provider_id);
+  if (!provider?.models.includes(thread.model_id)) {
+    toast('Choose a provider and model before sending.', true);
+    if (!provider?.models.length) settings.open('providers', provider?.id);
+    else $('model-select').focus();
+    return;
+  }
+  const submitted = { text: draft.text, attachment: draft.attachment };
+  draft.error = null;
+  draft.notice = null;
+  draft.text = '';
+  draft.attachment = null;
+  $('prompt').value = '';
+  turns.set(thread.id, { stream: '', notice: '', approval: null, accepted: false });
+  render();
+  try {
+    await invoke('send_message', { prompt: { thread: thread.id, text: submitted.text, attachment: submitted.attachment?.path ?? null } });
+  } catch (error) {
+    draft.error = String(error);
+    if (!turns.get(thread.id)?.accepted) {
+      draft.text = submitted.text;
+      draft.attachment = submitted.attachment;
+      if (thread.id === active) $('prompt').value = draft.text;
+    }
+    toast(draft.error, true);
+  } finally {
+    turns.delete(thread.id);
+    unreadApprovals.delete(thread.id);
+    await refresh();
+    if (thread.id === active) { $('prompt').focus(); scrollDown(true); }
+  }
+}
+
+function onTurn({ thread: id, kind, details }) {
+  const turn = turns.get(id);
+  const thread = data.threads.find((value) => value.id === id);
+  if (!turn || !thread) return;
+  switch (kind) {
+    case 'accepted':
+      turn.accepted = true;
+      thread.title = details.title;
+      if (!thread.messages.some((message) => message.id === details.message.id)) thread.messages.push(details.message);
+      if (id === active) render();
+      break;
+    case 'delta': {
+      turn.stream += details.text;
+      if (id !== active) break;
+      const node = $('stream-text');
+      if (!node) { welcome(thread); timeline(thread); }
+      else { const scroll = nearBottom(); node.append(document.createTextNode(details.text)); if (scroll) scrollDown(true); }
+      break;
+    }
+    case 'checkpoint':
+      turn.stream = '';
+      if (!thread.messages.some((message) => message.id === details.message.id)) thread.messages.push(details.message);
+      if (id === active) timeline(thread);
+      break;
+    case 'stopped':
+      draftOf(id).notice = 'Turn stopped.';
+      break;
+    case 'notice':
+      turn.notice = details.message;
+      if (id === active) status();
+      break;
+    case 'approval':
+      turn.approval = details;
+      unreadApprovals.set(id, details.id);
+      navigation();
+      if (id === active) { status(); scrollDown(true); }
+      else toast(`Approval needed in “${thread.title}”.`);
+      break;
+    case 'resolved':
+      turn.approval = null;
+      unreadApprovals.delete(id);
+      navigation();
+      if (id === active) status();
+      break;
+    case 'tool':
+      thread.messages.push({ role: 'tool', tool_label: details.name, text: details.output });
+      turn.notice = details.success ? `Finished ${details.name}` : `${details.name} reported an error`;
+      if (id === active) { timeline(thread); status(); }
+      break;
+  }
+}
+
+function bind() {
+  $('settings-button').replaceChildren(icon('settings', 19), 'Settings');
+  $('settings-button').addEventListener('click', () => settings.open());
+  $('new-thread').replaceChildren(icon('plus', 17));
+  $('new-thread').addEventListener('click', () => queueNavigation(() => mode === 'agent' ? addProject() : makeThread()));
+  $('close-settings').replaceChildren(icon('close', 18));
+  $('close-details').replaceChildren(icon('close', 18));
+  $('close-details').addEventListener('click', () => $('details').close());
+  $('attach').replaceChildren(icon('attach', 19));
+  $('attach').addEventListener('click', transient(async () => {
+    const id = active;
+    const path = await io.open({ multiple: false, title: 'Attach a file' });
+    if (!path) return;
+    const file = await invoke('load_attachment', { path });
+    draftOf(id).attachment = { path, name: file.name };
+    if (id === active) attachment();
+  }));
+  $('toggle-sidebar').replaceChildren(icon('panel', 19));
+  $('toggle-sidebar').addEventListener('click', () => {
+    sidebarVisible = !sidebarVisible;
+    $('app-frame').classList.toggle('sidebar-hidden', !sidebarVisible);
+    $('toggle-sidebar').setAttribute('aria-expanded', String(sidebarVisible));
+  });
+  $('provider-select').addEventListener('change', transient(async (event) => {
+    const provider = data.providers.find((item) => item.id === event.target.value);
+    await setSelection(current(), provider?.id, provider?.models[0]);
+  }));
+  $('model-select').addEventListener('change', transient((event) => setSelection(current(), $('provider-select').value, event.target.value)));
+  $('prompt').addEventListener('input', (event) => {
+    const draft = draftOf();
+    draft.text = event.target.value;
+    if (draft.error || draft.notice) { draft.error = null; draft.notice = null; status(); }
+  });
+  $('prompt').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault(); send().catch((error) => toast(String(error), true));
+    }
+  });
+  $('composer').addEventListener('submit', transient(send));
+  colorPreference.addEventListener('change', () => { if (liveAppearance) previewAppearance(liveAppearance); });
+  document.addEventListener('click', (event) => {
+    const dropdown = $('mode-dropdown');
+    if (dropdown?.classList.contains('open') && !dropdown.contains(event.target)) showModeOptions(dropdown, false);
+  });
+  document.addEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === ',') {
+      event.preventDefault(); settings.open();
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key === 'n' && !$('settings').open && !$('details').open) {
+      event.preventDefault(); queueNavigation(() => makeThread());
+    }
+  });
+}
+
+async function boot() {
+  if (!tauri) throw new Error('Launch OpenDex as a desktop app to connect the Rust backend.');
+  bind();
+  await tauri.event.listen('opendex-turn', ({ payload }) => onTurn(payload));
+  await tauri.event.listen('opendex-connection', ({ payload }) => settings.accountConnection(payload));
+  await refresh();
+  if (current()) {
+    mode = current().mode;
+    lastThreadByMode.set(mode, current().id);
+    render();
+  } else await makeThread();
+}
+
+boot().catch((error) => {
+  $('provider-summary').textContent = 'OpenDex could not connect';
+  toast(String(error), true);
+});

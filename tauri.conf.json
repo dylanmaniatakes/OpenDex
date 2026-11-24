@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenDex",
+  "version": "0.1.0",
+  "identifier": "org.opendex.desktop",
+  "build": {
+    "frontendDist": [
+      "ui/index.html",
+      "ui/style.css",
+      "ui/app.js",
+      "ui/dom.js",
+      "ui/icons.js",
+      "ui/settings.js"
+    ]
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "OpenDex",
+        "width": 1220,
+        "height": 800,
+        "minWidth": 670,
+        "minHeight": 540,
+        "backgroundColor": "#141619"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "capabilities": [
+        {
+          "identifier": "main",
+          "description": "OpenDex main window can subscribe to events and open native file dialogs.",
+          "windows": [
+            "main"
+          ],
+          "permissions": [
+            "core:event:default",
+            "dialog:allow-open",
+            "dialog:allow-save"
+          ]
+        }
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "category": "DeveloperTool"
+  }
+}
