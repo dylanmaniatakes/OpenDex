@@ -64,13 +64,12 @@ fn request_with_secret(
     mut request: RequestBuilder,
     secret: Option<&str>,
 ) -> Result<RequestBuilder> {
-    if matches!(
+    if (matches!(
         provider.kind,
-        ProviderKind::OpenAi
-            | ProviderKind::Anthropic
-            | ProviderKind::Gemini
-            | ProviderKind::OllamaCloud
-    ) && secret.is_none()
+        ProviderKind::OpenAi | ProviderKind::Gemini | ProviderKind::OllamaCloud
+    ) || (provider.kind == ProviderKind::Anthropic
+        && provider.anthropic_auth == AnthropicAuth::Api))
+        && secret.is_none()
         && provider.headers.is_empty()
     {
         bail!("Save an API key for {} in Settings.", provider.name);
@@ -367,5 +366,21 @@ mod tests {
 
         provider.api_key_header = Some("Host".into());
         assert!(provider.validate().is_err());
+    }
+
+    #[test]
+    fn anthropic_account_requests_do_not_require_an_api_key() {
+        let client = client().unwrap();
+        let url = "http://127.0.0.1:3000";
+        let mut provider = Provider::local();
+        provider.kind = ProviderKind::Anthropic;
+        provider.anthropic_auth = AnthropicAuth::Account;
+
+        let request = request_with_secret(&provider, client.get(url), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(request.headers().contains_key("anthropic-version"));
+        assert!(!request.headers().contains_key("x-api-key"));
     }
 }

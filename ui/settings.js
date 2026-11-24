@@ -91,6 +91,7 @@ export function settingsPanel(api) {
     return {
       id: uuid(), name: adapters[kind][0], kind, endpoint: adapters[kind][1], models: [],
       has_secret: false, headers: [], token_limit: null, ollama_think: null,
+      anthropic_auth: 'api',
     };
   }
 
@@ -137,7 +138,7 @@ export function settingsPanel(api) {
     let forget = false;
     const status = el('div', { class: 'form-status', role: 'status' });
     const isAccount = provider.kind === 'chat_gpt_account';
-    const anthropic = provider.kind === 'anthropic' && !adding;
+    const anthropic = provider.kind === 'anthropic';
     let anthropicAuth = provider.anthropic_auth ?? 'api';
     form.append(
       field('Adapter', options(Object.entries(adapters).map(([key, [name]]) => [key, name]), provider.kind,
@@ -171,8 +172,6 @@ export function settingsPanel(api) {
           anthropicAuth = value;
           render();
         })));
-    } else if (adding && provider.kind === 'anthropic') {
-      anthropicAuth = 'api';
     }
     const saveButton = el('button', { type: 'submit', class: 'button primary' }, icon('check', 16), adding ? 'Add provider' : 'Save connection');
     const actions = el('div', { class: 'form-actions wide' }, saveButton, status);
@@ -219,20 +218,23 @@ export function settingsPanel(api) {
     const status = el('div', { class: 'form-status', role: 'status' }, 'Checking Claude account…');
     const actions = el('div', { class: 'form-actions' });
     let connected = false;
-    api.invoke('anthropic_account_status', { id: provider.id }).then((result) => {
-      connected = !!result.connected;
-      const details = [
-        result.email,
-        result.organization,
-        result.subscription,
-        result.expires_in != null ? `Token expires in ${Math.floor(result.expires_in / 60)} min` : null,
-      ].filter(Boolean).join(' · ');
-      status.textContent = connected ? 'Signed in.' : 'Not signed in.';
-      if (connected && details) status.textContent = `Signed in. ${details}`;
-    }).catch((error) => {
-      status.textContent = String(error);
-    });
-    if (!provider.has_secret) {
+    const savedAsAccount = provider.anthropic_auth === 'account' && provider.kind === 'anthropic';
+    if (!savedAsAccount) {
+      status.textContent = 'Save this Anthropic connection first.';
+    } else if (!provider.has_secret) {
+      api.invoke('anthropic_account_status', { id: provider.id }).then((result) => {
+        connected = !!result.connected;
+        const details = [
+          result.email,
+          result.organization,
+          result.subscription,
+          result.expires_in != null ? `Token expires in ${Math.floor(result.expires_in / 60)} min` : null,
+        ].filter(Boolean).join(' · ');
+        status.textContent = connected ? 'Signed in.' : 'Not signed in.';
+        if (connected && details) status.textContent = `Signed in. ${details}`;
+      }).catch((error) => {
+        status.textContent = String(error);
+      });
       actions.append(
         button(!connected ? 'Connect account' : 'Refresh session', async () => {
           await run(status, status, async () => {
