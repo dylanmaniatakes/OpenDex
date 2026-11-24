@@ -41,7 +41,9 @@ On macOS I run scoped commands through Seatbelt. They can read approved project 
 
 In **Settings → MCP Servers**, I can add a local stdio command or a Streamable HTTP URL. Local servers take a JSON array of arguments and a list of environment variable names. HTTP servers can use a bearer key. **Test & list tools** checks the connection and exposes individual tool switches. I can enable the server for turns, then apply the MCP permission rule to its calls.
 
-I currently support initialized MCP sessions and the July 2026 protocol revision for tool discovery and calls. The MCP protocol selector is on each server. [MCP transport specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports)
+I use the **Add MCP context** button in either composer to browse an enabled server. I can search for a resource, preview the text, and attach it alongside a local file. For a resource template I enter the filled-in URI. For a prompt I fill in its arguments, preview the result, then insert the text into my draft. When a prompt includes assistant examples, I see them labeled in the draft. The model receives the draft and any selected resources when I send the message.
+
+I currently support initialized MCP sessions and the July 2026 protocol revision for tools, resources, and prompts. The MCP protocol selector is on each server. [MCP transport specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports)
 
 ## Appearance and data
 
@@ -69,7 +71,7 @@ cargo test --locked
 cargo test --locked --test provider_transports installed_codex_server -- --ignored
 ```
 
-I use loopback fixtures to test each wire format and MCP transport without account credentials. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, and approved a file edit and an MCP call in a disposable project.
+I use loopback fixtures to test each wire format and MCP transport without account credentials. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, approved a file edit and an MCP call in a disposable project, and sent a rendered MCP prompt with a text resource to a local Ollama model.
 
 ### Source layout
 
@@ -83,6 +85,6 @@ I use loopback fixtures to test each wire format and MCP transport without accou
 
 ## Preview scope
 
-This is my first local preview. My priorities are provider freedom, usable MCP settings, project-based agent work, and transparent permissions. I still have work to do on voice, generated media, web and computer-use tools, automations, shared/cloud history, MCP resources and prompts, and platform packaging. I plan to share the source after I’ve verified the workflows I use most often.
+This is my first local preview. My priorities are provider freedom, usable MCP settings, project-based agent work, and transparent permissions. I still have work to do on voice, generated media, web and computer-use tools, automations, shared/cloud history, MCP subscriptions and media-rich prompts, and platform packaging. I plan to share the source after I’ve verified the workflows I use most often.
 
 I’m making OpenDex available under the [MIT License](LICENSE).

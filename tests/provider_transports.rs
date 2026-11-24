@@ -412,3 +412,143 @@ for line in sys.stdin:
     );
     session.close().await;
 }
+
+#[tokio::test]
+async fn current_mcp_lists_pages_reads_resources_and_renders_prompt_arguments() {
+    let fixture = Fixture::new(7, |request| {
+        let method = request.body["method"].as_str().unwrap();
+        assert!(request.headers.contains(&format!("mcp-method: {method}")));
+        assert!(request.headers.contains("mcp-protocol-version: 2026-07-28"));
+        let args = &request.body["params"];
+        let result = match method {
+            "server/discover" => json!({"capabilities":{"resources":{},"prompts":{}}}),
+            "resources/list" if args["cursor"] == "page-2" => {
+                json!({"resources":[{"uri":"sample://notes/second","name":"Second note"}]})
+            }
+            "resources/list" => {
+                assert!(args["cursor"].is_null());
+                json!({"resources":[{"uri":"sample://notes/first","name":"First note"}],"nextCursor":"page-2"})
+            }
+            "resources/templates/list" => {
+                json!({"resourceTemplates":[{"uriTemplate":"sample://notes/{name}","name":"Find note"}]})
+            }
+            "prompts/list" => json!({"prompts":[{"name":"review","title":"Review text",
+                "arguments":[{"name":"topic","required":true}]}]}),
+            "resources/read" => {
+                assert_eq!(args["uri"], "sample://notes/second");
+                assert!(request.headers.contains("mcp-name: sample://notes/second"));
+                json!({"contents":[{"uri":args["uri"],"text":"Fieldnotes from MCP."},
+                                   {"uri":"sample://notes/image","blob":"AAAA"}]})
+            }
+            "prompts/get" => {
+                assert_eq!(args["name"], "review");
+                assert_eq!(args["arguments"], json!({"topic":"Release notes"}));
+                assert!(request.headers.contains("mcp-name: review"));
+                json!({"messages":[
+                    {"role":"assistant","content":{"type":"text","text":"I can review a draft."}},
+                    {"role":"user","content":{"type":"resource","resource":{"uri":"sample://draft","text":"Review Release notes."}}}
+                ]})
+            }
+            _ => panic!("unexpected MCP method {method}"),
+        };
+        let response = json!({"jsonrpc":"2.0","id":request.body["id"],"result":result});
+        ("application/json", String::new(), response.to_string())
+    });
+    let mut session = Connection::connect(
+        &providers::client().unwrap(),
+        &server(fixture.endpoint.clone(), true),
+        None,
+    )
+    .await
+    .unwrap();
+    let catalog = session.context_catalog().await.unwrap();
+    assert_eq!(catalog.resources.len(), 2);
+    assert_eq!(catalog.templates[0].uri_template, "sample://notes/{name}");
+    assert!(catalog.prompts[0].arguments[0].required);
+    let resource = session
+        .read_resource(&catalog.resources[1].uri)
+        .await
+        .unwrap();
+    assert_eq!(resource.binary_count, 1);
+    assert!(resource.text.contains("Fieldnotes from MCP."));
+    let messages = session
+        .get_prompt("review", [("topic".into(), "Release notes".into())].into())
+        .await
+        .unwrap();
+    assert_eq!(messages[0].role, "assistant");
+    assert_eq!(messages[1].text, "Review Release notes.");
+    session.close().await;
+    fixture.finish();
+}
+
+#[tokio::test]
+async fn legacy_mcp_catalog_preserves_resources_when_templates_are_unavailable() {
+    let fixture = Fixture::new(4, |request| {
+        let method = request.body["method"].as_str().unwrap();
+        let result = match method {
+            "initialize" => json!({"protocolVersion":"2025-11-25","capabilities":{"resources":{}}}),
+            "notifications/initialized" => json!({}),
+            "resources/list" => json!({"resources":[{"uri":"sample://first","name":"First"}]}),
+            "resources/templates/list" => {
+                let error = json!({"jsonrpc":"2.0","id":request.body["id"],"error":{"code":-32601,"message":"Method unavailable"}});
+                return ("application/json", String::new(), error.to_string());
+            }
+            _ => panic!("unexpected MCP method {method}"),
+        };
+        let response = json!({"jsonrpc":"2.0","id":request.body["id"],"result":result});
+        ("application/json", String::new(), response.to_string())
+    });
+    let mut session = Connection::connect(
+        &providers::client().unwrap(),
+        &server(fixture.endpoint.clone(), false),
+        None,
+    )
+    .await
+    .unwrap();
+    let catalog = session.context_catalog().await.unwrap();
+    assert_eq!(catalog.resources[0].name, "First");
+    assert!(catalog.templates.is_empty());
+    assert!(catalog.prompts.is_empty());
+    session.close().await;
+    fixture.finish();
+}
+
+#[tokio::test]
+async fn a_resource_only_message_reaches_chat_completions() {
+    let fixture = Fixture::new(1, |request| {
+        let message = &request.body["messages"][0];
+        assert_eq!(message["role"], "user");
+        let content = message["content"].as_str().unwrap();
+        assert!(content.contains("sample://notes/second"));
+        assert!(content.contains("Fieldnotes from MCP."));
+        (
+            "text/event-stream",
+            String::new(),
+            response(&[
+                json!({"choices":[{"delta":{"content":"Received resource"},"finish_reason":"stop"}]}),
+            ]),
+        )
+    });
+    let mut message = Message::new(Role::User, "");
+    message.resources.push(opendex::state::McpResource {
+        server_id: Uuid::new_v4(),
+        source: "Notes".into(),
+        name: "Second note".into(),
+        uri: "sample://notes/second".into(),
+        text: "Fieldnotes from MCP.".into(),
+    });
+    assert!(message.has_content());
+    let result = providers::generate(
+        &providers::client().unwrap(),
+        &provider(&fixture, ProviderKind::OpenAiCompatible),
+        "fixture",
+        "",
+        &[message],
+        &[],
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.text, "Received resource");
+    fixture.finish();
+}

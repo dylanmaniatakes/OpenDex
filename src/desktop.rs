@@ -6,15 +6,16 @@ use crate::{
     mcp::{self, Connection},
     providers::{self, Tool},
     state::{
-        Appearance, Data, Message, Mode, Permissions, Project, Provider, ProviderKind, Role, Rule,
-        Server, Store, Thread, ToolCall, Transport, delete_secret, write_secret,
+        Appearance, Data, MAX_RESOURCE_BYTES, MAX_RESOURCES_PER_MESSAGE, McpResource, Message,
+        Mode, Permissions, Project, Provider, ProviderKind, Role, Rule, Server, Store, Thread,
+        ToolCall, Transport, delete_secret, write_secret,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -237,6 +238,88 @@ async fn test_server(app: AppState<'_>, id: Uuid) -> Reply<ServerStatus> {
                 version: session.version.clone(),
                 tools,
             });
+            session.close().await;
+            result
+        }
+        .await,
+    )
+}
+
+fn enabled_mcp_server(data: &Data, id: Uuid) -> Result<&Server> {
+    ensure!(
+        data.permissions.effective().mcp != Rule::Deny,
+        "This permission profile disables MCP."
+    );
+    data.servers
+        .iter()
+        .find(|server| server.id == id && server.enabled)
+        .context("Enable this MCP server in Settings first.")
+}
+
+async fn connect_context(app: &Desktop, thread: Uuid, id: Uuid) -> Result<Connection> {
+    app.ensure_idle(thread)?;
+    let data = app.store.snapshot();
+    let thread = fetch_thread(&data, thread)?;
+    let server = enabled_mcp_server(&data, id)?;
+    let root = if server.transport == Transport::Stdio {
+        thread
+            .workspace
+            .as_deref()
+            .map(agent::checked_root)
+            .transpose()?
+    } else {
+        None
+    };
+    Connection::connect(&app.client, server, root.as_deref()).await
+}
+
+#[tauri::command]
+async fn mcp_context_catalog(
+    app: AppState<'_>,
+    thread: Uuid,
+    id: Uuid,
+) -> Reply<mcp::ContextCatalog> {
+    reply(
+        async {
+            let mut session = connect_context(&app, thread, id).await?;
+            let result = session.context_catalog().await;
+            session.close().await;
+            result
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn mcp_read_resource(
+    app: AppState<'_>,
+    thread: Uuid,
+    id: Uuid,
+    uri: String,
+) -> Reply<mcp::ResourcePreview> {
+    reply(
+        async {
+            let mut session = connect_context(&app, thread, id).await?;
+            let result = session.read_resource(&uri).await;
+            session.close().await;
+            result
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn mcp_get_prompt(
+    app: AppState<'_>,
+    thread: Uuid,
+    id: Uuid,
+    name: String,
+    arguments: BTreeMap<String, String>,
+) -> Reply<Vec<mcp::PromptMessage>> {
+    reply(
+        async {
+            let mut session = connect_context(&app, thread, id).await?;
+            let result = session.get_prompt(&name, arguments).await;
             session.close().await;
             result
         }
@@ -502,8 +585,7 @@ fn export_thread(app: AppState<'_>, id: Uuid, path: PathBuf) -> Reply<()> {
         let thread = fetch_thread(&data, id)?;
         let mut content = format!("# {}\n", thread.title);
         for message in &thread.messages {
-            if message.role == Role::Tool || message.text.is_empty() && message.attachment.is_none()
-            {
+            if message.role == Role::Tool || !message.has_content() {
                 continue;
             }
             let label = if message.role == Role::User {
@@ -874,10 +956,7 @@ async fn complete_turn(
         .messages
         .into_iter()
         .filter_map(|mut message| {
-            if message.incomplete
-                || message.role == Role::Tool
-                || (message.text.is_empty() && message.attachment.is_none())
-            {
+            if message.incomplete || message.role == Role::Tool || !message.has_content() {
                 return None;
             }
             message.calls.clear();
@@ -987,6 +1066,33 @@ struct Prompt {
     thread: Uuid,
     text: String,
     attachment: Option<PathBuf>,
+    #[serde(default)]
+    resources: Vec<McpResource>,
+}
+
+fn validate_resources(data: &Data, resources: &[McpResource]) -> Result<()> {
+    ensure!(
+        resources.len() <= MAX_RESOURCES_PER_MESSAGE,
+        "Attach up to eight MCP resources per message."
+    );
+    let mut size = 0;
+    for resource in resources {
+        enabled_mcp_server(data, resource.server_id)?;
+        ensure!(
+            !resource.name.trim().is_empty()
+                && resource.name.len() <= 512
+                && resource.source.len() <= 512
+                && resource.uri.len() <= 2048
+                && !resource.text.trim().is_empty(),
+            "The MCP resource attachment is invalid."
+        );
+        size += resource.text.len();
+        ensure!(
+            size <= MAX_RESOURCE_BYTES,
+            "These MCP resources exceed the combined text size limit."
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -994,14 +1100,15 @@ async fn send_message(app: AppState<'_>, window: AppHandle, prompt: Prompt) -> R
     let outcome = async {
         let text = prompt.text.trim();
         ensure!(
-            !text.is_empty() || prompt.attachment.is_some(),
-            "Write a message or attach a file."
+            !text.is_empty() || prompt.attachment.is_some() || !prompt.resources.is_empty(),
+            "Write a message or attach a file or resource."
         );
         ensure!(
             text.len() <= 256_000,
             "This message exceeds the size limit."
         );
         let data = app.store.snapshot();
+        validate_resources(&data, &prompt.resources)?;
         let thread = fetch_thread(&data, prompt.thread)?;
         let provider = provider(&data, thread.provider_id.context("Choose a provider.")?)?.clone();
         let model = thread
@@ -1056,6 +1163,7 @@ async fn send_message(app: AppState<'_>, window: AppHandle, prompt: Prompt) -> R
         }
         let mut message = Message::new(Role::User, text);
         message.attachment = attachment;
+        message.resources = prompt.resources;
         let thread = app.store.change(|data| {
             let thread = thread_mut(data, prompt.thread)?;
             if thread.messages.is_empty() && thread.title == "New conversation" {
@@ -1063,6 +1171,12 @@ async fn send_message(app: AppState<'_>, window: AppHandle, prompt: Prompt) -> R
                     .lines()
                     .find(|line| !line.trim().is_empty())
                     .or_else(|| message.attachment.as_ref().map(|file| file.name.as_str()))
+                    .or_else(|| {
+                        message
+                            .resources
+                            .first()
+                            .map(|resource| resource.name.as_str())
+                    })
                     .unwrap_or("New conversation")
                     .trim();
                 thread.title = title.chars().take(58).collect();
@@ -1148,6 +1262,9 @@ pub fn run() {
             save_server,
             remove_server,
             test_server,
+            mcp_context_catalog,
+            mcp_read_resource,
+            mcp_get_prompt,
             save_settings,
             account_action,
             new_thread,

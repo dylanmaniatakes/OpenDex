@@ -1,12 +1,19 @@
-//! MCP tools over local stdio and remote Streamable HTTP.
+//! MCP tools, resources, and prompts over stdio and Streamable HTTP.
 use crate::{
     providers::{Tool, checked, frames},
-    state::{Server, Transport, endpoint, read_secret},
+    state::{MAX_RESOURCE_BYTES, Server, Transport, endpoint, read_secret},
 };
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::{Client, header};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+    path::Path,
+    process::Stdio,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -72,6 +79,76 @@ pub struct Connection {
     id: u64,
     pub version: String,
     pub server: Server,
+    capabilities: Option<Value>,
+}
+
+#[derive(Debug)]
+struct RpcError {
+    server: String,
+    code: Option<i64>,
+    message: String,
+}
+
+impl fmt::Display for RpcError {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(output, "MCP {}: {}", self.server, self.message)
+    }
+}
+
+impl std::error::Error for RpcError {}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Resource {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub uri: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceTemplate {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub uri_template: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PromptArgument {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PromptTemplate {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub arguments: Vec<PromptArgument>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ContextCatalog {
+    pub can_read_resources: bool,
+    pub resources: Vec<Resource>,
+    pub templates: Vec<ResourceTemplate>,
+    pub prompts: Vec<PromptTemplate>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResourcePreview {
+    pub text: String,
+    pub binary_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PromptMessage {
+    pub role: String,
+    pub text: String,
 }
 
 fn identity() -> Value {
@@ -127,6 +204,7 @@ impl Connection {
             }
             .into(),
             server: server.clone(),
+            capabilities: None,
         };
         if !server.current_protocol {
             let response = connection
@@ -145,6 +223,7 @@ impl Connection {
                 "Unsupported MCP version {version}. Check the server's protocol setting."
             );
             connection.version = version.into();
+            connection.capabilities = Some(response["capabilities"].clone());
             connection
                 .send("notifications/initialized", json!({}), None)
                 .await?;
@@ -160,11 +239,12 @@ impl Connection {
             .await?
             .context("MCP server returned no response.")?;
         if let Some(error) = response.get("error") {
-            bail!(
-                "MCP {}: {}",
-                self.server.name,
-                error["message"].as_str().unwrap_or("request failed")
-            );
+            return Err(RpcError {
+                server: self.server.name.clone(),
+                code: error["code"].as_i64(),
+                message: error["message"].as_str().unwrap_or("request failed").into(),
+            }
+            .into());
         }
         let result = response
             .get("result")
@@ -172,7 +252,7 @@ impl Connection {
             .context("MCP response is missing a result.")?;
         ensure!(
             result["resultType"] != "input_required",
-            "This MCP tool requires an interactive input round trip."
+            "This MCP operation requires an interactive input round trip."
         );
         Ok(result)
     }
@@ -190,7 +270,12 @@ impl Connection {
                 "io.modelcontextprotocol/clientCapabilities": {}
             });
         }
-        let mirrored = params["name"].as_str().map(str::to_owned);
+        let mirrored = match method {
+            "resources/read" => params["uri"].as_str(),
+            "tools/call" | "prompts/get" => params["name"].as_str(),
+            _ => None,
+        }
+        .map(str::to_owned);
         let mut message = json!({"jsonrpc":"2.0","method":method,"params":params});
         if let Some(id) = id {
             message["id"] = json!(id);
@@ -268,7 +353,18 @@ impl Connection {
                         .get(header::CONTENT_TYPE)
                         .is_some_and(|v| v.as_bytes().starts_with(b"text/event-stream"));
                     if !sse {
-                        let value: Value = raw.json().await?;
+                        let mut body = raw.bytes_stream();
+                        let mut bytes = Vec::new();
+                        use futures_util::StreamExt;
+                        while let Some(chunk) = body.next().await {
+                            let chunk = chunk?;
+                            ensure!(
+                                bytes.len() + chunk.len() <= MAX_FRAME as usize,
+                                "JSON-RPC message exceeds the size limit."
+                            );
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        let value: Value = serde_json::from_slice(&bytes)?;
                         ensure!(
                             value["id"].as_u64() == Some(id),
                             "MCP response had an unexpected ID."
@@ -296,15 +392,40 @@ impl Connection {
         .with_context(|| format!("{} timed out on {method}.", self.server.name))?
     }
 
-    pub async fn tools(&mut self) -> Result<Vec<Tool>> {
+    async fn list<T: DeserializeOwned>(&mut self, method: &str, field: &str) -> Result<Vec<T>> {
         let mut params = json!({});
+        let mut cursors = HashSet::new();
         let mut items = Vec::new();
         for _ in 0..12 {
-            let result = self.request("tools/list", params.clone()).await?;
-            let tools = result["tools"]
-                .as_array()
-                .context("MCP server did not return tools.")?;
-            items.extend(tools.iter().filter_map(|item| {
+            let mut result = self.request(method, params.clone()).await?;
+            let page = result
+                .get_mut(field)
+                .with_context(|| format!("MCP response is missing {field}."))?
+                .take();
+            let page: Vec<T> = serde_json::from_value(page)
+                .with_context(|| format!("Invalid data returned by {method}."))?;
+            ensure!(
+                items.len() + page.len() <= 2000,
+                "MCP catalog exceeds the item limit."
+            );
+            items.extend(page);
+            let Some(cursor) = result["nextCursor"].as_str() else {
+                return Ok(items);
+            };
+            ensure!(
+                cursors.insert(cursor.to_owned()),
+                "MCP server returned a repeated page cursor."
+            );
+            params["cursor"] = json!(cursor);
+        }
+        bail!("MCP catalog exceeds the page limit.")
+    }
+
+    pub async fn tools(&mut self) -> Result<Vec<Tool>> {
+        let items: Vec<Value> = self.list("tools/list", "tools").await?;
+        Ok(items
+            .into_iter()
+            .filter_map(|item| {
                 Some(Tool {
                     name: item["name"].as_str()?.into(),
                     description: item["description"].as_str().unwrap_or_default().into(),
@@ -312,13 +433,144 @@ impl Connection {
                         .as_object()
                         .map(|_| item["inputSchema"].clone())?,
                 })
-            }));
-            let Some(cursor) = result["nextCursor"].as_str() else {
-                break;
-            };
-            params["cursor"] = json!(cursor);
+            })
+            .collect())
+    }
+
+    pub async fn context_catalog(&mut self) -> Result<ContextCatalog> {
+        // Connections using initialize already have the server's capabilities.
+        if self.capabilities.is_none() {
+            let mut discovered = self.request("server/discover", json!({})).await?;
+            self.capabilities = Some(discovered["capabilities"].take());
         }
-        Ok(items)
+        let capabilities = self.capabilities.as_ref().unwrap_or(&Value::Null);
+        let has_resources = capabilities["resources"].is_object();
+        let has_prompts = capabilities["prompts"].is_object();
+        let mut catalog = ContextCatalog {
+            can_read_resources: has_resources,
+            ..ContextCatalog::default()
+        };
+        if has_resources {
+            catalog.resources = self.list("resources/list", "resources").await?;
+            catalog.templates = match self
+                .list("resources/templates/list", "resourceTemplates")
+                .await
+            {
+                Err(error)
+                    if error
+                        .downcast_ref::<RpcError>()
+                        .is_some_and(|error| error.code == Some(-32601)) =>
+                {
+                    vec![]
+                }
+                result => result?,
+            };
+        }
+        if has_prompts {
+            catalog.prompts = self.list("prompts/list", "prompts").await?;
+        }
+        Ok(catalog)
+    }
+
+    pub async fn read_resource(&mut self, uri: &str) -> Result<ResourcePreview> {
+        ensure!(
+            uri.len() <= 2048
+                && reqwest::Url::parse(uri).is_ok()
+                && !uri.chars().any(char::is_control),
+            "Enter a valid absolute resource URI."
+        );
+        // Even file: and https: identifiers are passed to the selected MCP
+        // server. The client never opens those paths or URLs directly.
+        let result = self.request("resources/read", json!({"uri":uri})).await?;
+        let contents = result["contents"]
+            .as_array()
+            .context("MCP server did not return resource contents.")?;
+        let mut text = String::new();
+        let mut binary_count = 0;
+        for content in contents {
+            let Some(body) = content["text"].as_str() else {
+                binary_count += 1;
+                continue;
+            };
+            ensure!(
+                text.len() + body.len() <= MAX_RESOURCE_BYTES,
+                "This resource exceeds the text size limit."
+            );
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            let source = content["uri"].as_str().unwrap_or(uri);
+            if contents.len() > 1 {
+                text.push_str(&format!("[{source}]\n"));
+            }
+            text.push_str(body);
+            ensure!(
+                text.len() <= MAX_RESOURCE_BYTES,
+                "This resource exceeds the text size limit."
+            );
+        }
+        ensure!(
+            !text.trim().is_empty(),
+            "This resource contains no text to attach."
+        );
+        Ok(ResourcePreview { text, binary_count })
+    }
+
+    pub async fn get_prompt(
+        &mut self,
+        name: &str,
+        arguments: BTreeMap<String, String>,
+    ) -> Result<Vec<PromptMessage>> {
+        ensure!(
+            !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control),
+            "Invalid MCP prompt name."
+        );
+        ensure!(
+            arguments.len() <= 64
+                && arguments.keys().all(|key| key.len() <= 256)
+                && arguments.values().map(String::len).sum::<usize>() <= MAX_RESOURCE_BYTES,
+            "MCP prompt arguments exceed the size limit."
+        );
+        let result = self
+            .request("prompts/get", json!({"name":name,"arguments":arguments}))
+            .await?;
+        let messages = result["messages"]
+            .as_array()
+            .context("MCP server did not return prompt messages.")?;
+        ensure!(
+            messages.len() <= 64,
+            "This MCP prompt has too many messages."
+        );
+        let mut preview = Vec::with_capacity(messages.len());
+        let mut size = 0;
+        for message in messages {
+            let role = message["role"]
+                .as_str()
+                .filter(|role| matches!(*role, "user" | "assistant"))
+                .context("MCP prompt has an invalid message role.")?;
+            let content = &message["content"];
+            let text = match content["type"].as_str() {
+                Some("text") => content["text"].as_str(),
+                Some("resource") => content["resource"]["text"].as_str(),
+                _ => None,
+            }.context("This MCP prompt contains media or a resource link. OpenDex can insert prompts with text and embedded text resources.")?;
+            size += text.len();
+            ensure!(
+                size <= MAX_RESOURCE_BYTES,
+                "This MCP prompt exceeds the text size limit."
+            );
+            preview.push(PromptMessage {
+                role: role.into(),
+                text: text.into(),
+            });
+        }
+        ensure!(
+            preview
+                .iter()
+                .any(|message| !message.text.trim().is_empty()),
+            "This MCP prompt contains no text to use."
+        );
+        Ok(preview)
     }
 
     pub async fn call(&mut self, name: &str, arguments: Value) -> Result<String> {

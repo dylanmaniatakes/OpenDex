@@ -73,7 +73,7 @@ pub(super) fn payload(
                     input.push(json!({"type":"function_call_output","call_id":message.tool_id,"output":message.text}));
                     continue;
                 }
-                if !message.text.is_empty() || message.attachment.is_some() {
+                if message.has_content() {
                     let mut content = json!(message.content());
                     if let Some(file) = &message.attachment
                         && let Some(mime) = &file.media_type
@@ -129,7 +129,7 @@ pub(super) fn payload(
                     blocks.push(json!({"type":"tool_result","tool_use_id":message.tool_id,"content":message.text}));
                     continue;
                 }
-                if !message.text.is_empty() || message.attachment.is_some() {
+                if message.has_content() {
                     blocks.push(json!({"type":"text","text":message.content()}));
                 }
                 if let Some(file) = &message.attachment

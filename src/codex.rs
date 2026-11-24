@@ -273,9 +273,7 @@ impl Bridge {
             .context("Codex did not return a thread ID.")?;
         let context: Vec<_> = messages
             .iter()
-            .filter(|msg| {
-                msg.role != Role::Tool && (!msg.text.is_empty() || msg.attachment.is_some())
-            })
+            .filter(|msg| msg.role != Role::Tool && msg.has_content())
             .map(|msg| json!({"role":msg.role,"content":msg.content()}))
             .collect();
         let input = if context.len() == 1 {

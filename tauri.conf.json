@@ -10,7 +10,8 @@
       "ui/app.js",
       "ui/dom.js",
       "ui/icons.js",
-      "ui/settings.js"
+      "ui/settings.js",
+      "ui/mcp-context.js"
     ]
   },
   "app": {

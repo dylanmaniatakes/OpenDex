@@ -1,5 +1,6 @@
 import { $, button, el, field, markdown } from './dom.js';
 import { icon } from './icons.js';
+import { mcpContextPicker } from './mcp-context.js';
 import { settingsPanel, permissionName } from './settings.js';
 
 const tauri = window.__TAURI__;
@@ -30,7 +31,7 @@ let navQueue = Promise.resolve();
 const current = () => data?.threads.find((thread) => thread.id === active);
 const live = () => turns.get(active);
 const draftOf = (id = active) => {
-  if (!drafts.has(id)) drafts.set(id, { text: '', attachment: null });
+  if (!drafts.has(id)) drafts.set(id, { text: '', attachment: null, resources: [] });
   return drafts.get(id);
 };
 
@@ -458,7 +459,7 @@ function messageCard(message) {
     return el('details', { class: 'tool-result' }, el('summary', {}, icon('terminal', 15), message.tool_label ?? message.tool_name ?? 'Tool result'),
       el('pre', {}, message.text));
   }
-  if (!message.text && !message.attachment) return null;
+  if (!message.text && !message.attachment && !message.resources?.length) return null;
   const body = user ? el('div', { class: 'user-text' }, message.text) : markdown(message.text, copy);
   const meta = user ? null : el('div', { class: 'assistant-meta' },
     el('span', { class: 'brand-symbol tiny', 'aria-hidden': 'true' }),
@@ -471,7 +472,10 @@ function messageCard(message) {
       message.attachment?.media_type?.startsWith('image/') && el('img', {
         class: 'preview-image', src: 'data:' + message.attachment.media_type + ';base64,' + message.attachment.text,
         alt: message.attachment.name, loading: 'lazy',
-      })));
+      }),
+      message.resources?.map((resource) => el('details', { class: 'tool-result message-resource' },
+        el('summary', {}, icon('plug', 15), resource.name, el('small', {}, ' · ' + resource.source)),
+        el('pre', {}, resource.text)))));
 }
 
 function nearBottom() {
@@ -526,10 +530,56 @@ function status() {
 }
 
 function attachment() {
-  const item = draftOf().attachment;
-  $('attachment-row').hidden = !item;
-  $('attachment-row').replaceChildren(...item ? [el('div', { class: 'chip file-chip' }, icon('note', 15), item.name,
-    button('Remove attachment', () => { draftOf().attachment = null; attachment(); }, { glyph: 'close', onlyIcon: true, style: 'icon-button small' }))] : []);
+  const draft = draftOf();
+  const items = [];
+  if (draft.attachment) {
+    items.push(el('div', { class: 'chip file-chip' }, icon('note', 15), draft.attachment.name,
+      button('Remove attachment', () => { draft.attachment = null; attachment(); }, { glyph: 'close', onlyIcon: true, style: 'icon-button small' })));
+  }
+  for (const resource of draft.resources) {
+    items.push(el('div', { class: 'chip file-chip', title: resource.source + ' · ' + resource.uri },
+      icon('plug', 15), resource.name,
+      button('Remove ' + resource.name, () => {
+        draft.resources = draft.resources.filter((item) => item !== resource);
+        attachment();
+      }, { glyph: 'close', onlyIcon: true, style: 'icon-button small' })));
+  }
+  $('attachment-row').hidden = items.length === 0;
+  $('attachment-row').replaceChildren(...items);
+}
+
+function openMcpContext() {
+  const thread = current();
+  if (!thread || live()) return;
+  const policy = data.permissions;
+  const allowed = policy.profile !== 'read_only' && !(policy.profile === 'custom' && policy.mcp === 'deny');
+  const close = () => $('details').close();
+  mcpContextPicker({
+    servers: data.servers.filter((server) => server.enabled),
+    allowed, invoke, thread: thread.id, show: showDetails, close,
+    settings: (tab) => settings.open(tab),
+    addResource: (resource) => {
+      const draft = draftOf(thread.id);
+      const resources = draft.resources.filter((item) => item.server_id !== resource.server_id || item.uri !== resource.uri);
+      if (resources.length >= 8) { toast('Attach up to eight MCP resources per message.', true); return; }
+      draft.resources = [...resources, resource];
+      close();
+      if (active === thread.id) { attachment(); $('prompt').focus(); }
+    },
+    insertPrompt: (messages) => {
+      const draft = draftOf(thread.id);
+      const text = messages.length === 1 && messages[0].role === 'user'
+        ? messages[0].text
+        : messages.map(({ role, text }) => (role === 'assistant' ? 'Assistant example' : 'User message') + '\n' + text).join('\n\n');
+      draft.text = [draft.text, text].filter(Boolean).join('\n\n');
+      close();
+      if (active === thread.id) {
+        $('prompt').value = draft.text;
+        $('prompt').focus();
+        $('prompt').setSelectionRange(draft.text.length, draft.text.length);
+      }
+    },
+  });
 }
 
 function composer(thread) {
@@ -541,6 +591,7 @@ function composer(thread) {
   $('prompt').placeholder = modes[mode].placeholder;
   $('prompt').disabled = busy || !thread;
   $('attach').disabled = busy || !thread;
+  $('mcp-context').disabled = busy || !thread;
   $('send').replaceChildren(icon(busy ? 'stop' : 'send', 21));
   $('send').title = busy ? 'Stop response' : 'Send message';
   $('send').setAttribute('aria-label', $('send').title);
@@ -566,7 +617,7 @@ async function send(event) {
   if (!thread) return;
   if (live()) { await invoke('stop_turn', { id: thread.id }); return; }
   const draft = draftOf();
-  if (!draft.text.trim() && !draft.attachment) return;
+  if (!draft.text.trim() && !draft.attachment && !draft.resources.length) return;
   const provider = data.providers.find((item) => item.id === thread.provider_id);
   if (!provider?.models.includes(thread.model_id)) {
     toast('Choose a provider and model before sending.', true);
@@ -574,21 +625,23 @@ async function send(event) {
     else $('model-select').focus();
     return;
   }
-  const submitted = { text: draft.text, attachment: draft.attachment };
+  const submitted = { text: draft.text, attachment: draft.attachment, resources: draft.resources };
   draft.error = null;
   draft.notice = null;
   draft.text = '';
   draft.attachment = null;
+  draft.resources = [];
   $('prompt').value = '';
   turns.set(thread.id, { stream: '', notice: '', approval: null, accepted: false });
   render();
   try {
-    await invoke('send_message', { prompt: { thread: thread.id, text: submitted.text, attachment: submitted.attachment?.path ?? null } });
+    await invoke('send_message', { prompt: { thread: thread.id, text: submitted.text, attachment: submitted.attachment?.path ?? null, resources: submitted.resources } });
   } catch (error) {
     draft.error = String(error);
     if (!turns.get(thread.id)?.accepted) {
       draft.text = submitted.text;
       draft.attachment = submitted.attachment;
+      draft.resources = submitted.resources;
       if (thread.id === active) $('prompt').value = draft.text;
     }
     toast(draft.error, true);
@@ -660,6 +713,8 @@ function bind() {
   $('close-settings').replaceChildren(icon('close', 18));
   $('close-details').replaceChildren(icon('close', 18));
   $('close-details').addEventListener('click', () => $('details').close());
+  $('mcp-context').replaceChildren(icon('plug', 17));
+  $('mcp-context').addEventListener('click', openMcpContext);
   $('attach').replaceChildren(icon('attach', 19));
   $('attach').addEventListener('click', transient(async () => {
     const id = active;

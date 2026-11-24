@@ -343,6 +343,18 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
+pub const MAX_RESOURCE_BYTES: usize = 128_000;
+pub const MAX_RESOURCES_PER_MESSAGE: usize = 8;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResource {
+    pub server_id: Uuid,
+    pub source: String,
+    pub name: String,
+    pub uri: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     #[serde(default = "Uuid::new_v4")]
@@ -368,6 +380,8 @@ pub struct Message {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<Attachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<McpResource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,11 +416,17 @@ impl Message {
             provider: None,
             model: None,
             attachment: None,
+            resources: vec![],
         }
     }
 
+    pub fn has_content(&self) -> bool {
+        !self.text.is_empty() || self.attachment.is_some() || !self.resources.is_empty()
+    }
+
     pub fn content(&self) -> String {
-        match &self.attachment {
+        use std::fmt::Write as _;
+        let mut content = match &self.attachment {
             Some(attachment) if attachment.media_type.is_some() => {
                 format!("{}\n\n[Attached: {}]", self.text, attachment.name)
             }
@@ -415,7 +435,15 @@ impl Message {
                 self.text, attachment.name, attachment.text
             ),
             None => self.text.clone(),
+        };
+        for resource in &self.resources {
+            let _ = write!(
+                content,
+                "\n\n<user_mcp_resource server={:?} uri={:?}>\n{}\n</user_mcp_resource>",
+                resource.source, resource.uri, resource.text
+            );
         }
+        content
     }
 }
 

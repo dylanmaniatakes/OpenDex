@@ -399,7 +399,7 @@ export function settingsPanel(api) {
       }, el('span', { class: 'choice-radio' }), el('span', {}, el('strong', {}, label), el('span', { class: 'muted' }, info)))));
       const effective = value.profile === 'custom' ? value : profileRules[value.profile];
       rules.replaceChildren(
-        ...[['read', 'Read workspace files'], ['write', 'Write workspace files'], ['command', 'Run local commands'], ['mcp', 'Use MCP tools']].map(([key, label]) =>
+        ...[['read', 'Read workspace files'], ['write', 'Write workspace files'], ['command', 'Run local commands'], ['mcp', 'Use MCP servers']].map(([key, label]) =>
           field(label, options([['deny', 'Deny'], ['ask', 'Ask every time'], ['allow', 'Allow']], effective[key],
             (next) => { value[key] = next; }, { disabled: value.profile !== 'custom' }))),
         field('Maximum tool calls per turn', steps),
