@@ -85,6 +85,7 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
             data.providers[0].name = "Backup endpoint".into();
             data.providers[0].kind = ProviderKind::OpenAiCompatible;
             data.providers[0].models.push("pinned-model".into());
+            data.providers[0].headers = vec![("X-Organization".into(), "OPENDEX_BACKUP_ORG".into())];
             data.image_generation = Some(images::Config {
                 provider: data.providers[0].id,
                 model: "image-fixture".into(),
@@ -108,6 +109,7 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
             data.servers.push(serde_json::from_value(json!({
                 "id":server_id, "name":"MCP fixture", "transport":"http",
                 "address":"http://localhost/mcp", "enabled":true,
+                "headers":[["X-Forwarded-Organization","OPENDEX_BACKUP_SERVER_ORG"]],
                 "tool_permissions":{"fixture":"deny"}
             }))?);
             data.projects.push(Project {
@@ -249,6 +251,7 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     );
     assert_eq!(restored.active_thread, Some(thread_id));
     assert_eq!(restored.providers[0].models, ["pinned-model"]);
+    assert_eq!(restored.providers[0].headers, [("X-Organization".into(), "OPENDEX_BACKUP_ORG".into())]);
     for (index, expected) in [(0, "fixture-api-key"), (2, session.as_str())] {
         let provider = &restored.providers[index];
         assert!(provider.has_secret);
@@ -265,6 +268,7 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
         );
     }
     let server = &restored.servers[0];
+    assert_eq!(server.headers, [("X-Forwarded-Organization".into(), "OPENDEX_BACKUP_SERVER_ORG".into())]);
     assert_eq!(
         read_secret(server.credential_id(), &server.address, true)
             .unwrap()
