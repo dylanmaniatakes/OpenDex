@@ -960,13 +960,23 @@ fn export_thread_content(thread: &Thread, provider: Option<&Provider>) -> String
         ));
     }
     for message in &thread.messages {
-        if message.role == Role::Tool || !message.has_content() {
+        if !message.has_content() {
             continue;
         }
         let label = if message.role == Role::User {
-            "You"
+            "You".to_owned()
+        } else if message.role == Role::Tool {
+            if let Some(label) = message
+                .tool_label
+                .as_deref()
+                .or(message.tool_name.as_deref())
+            {
+                format!("Tool · {label}")
+            } else {
+                "Tool".to_owned()
+            }
         } else {
-            message.model.as_deref().unwrap_or("Assistant")
+            message.model.as_deref().unwrap_or("Assistant").to_owned()
         };
         content.push_str(&format!("\n## {label}\n\n{}\n", message.content()));
         for attachment in &message.attachments {
@@ -1973,6 +1983,11 @@ mod tests {
             text: "Fixture text".into(),
         });
         thread.messages.push(message);
+        thread.messages.push({
+            let mut transcript = Message::new(Role::Tool, "Tool output saved\nsecond line");
+            transcript.tool_label = Some("Read file".into());
+            transcript
+        });
         let markdown = export_thread_content(&thread, Some(&provider));
         assert!(markdown.contains("# Saved example"));
         assert!(markdown.contains("Local model fixture · fixture-model"));

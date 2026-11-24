@@ -12,7 +12,7 @@ I built OpenDex to use the models I choose for everyday chat and coding. It runs
 
 I can search saved conversation titles, message text, project names, attachment names, and MCP resource labels from the sidebar. Search stays on my computer and filters the selected mode. In Code Agent, matching project groups expand while I search. Escape clears the query.
 
-I can rename or export each conversation and set instructions globally or per thread. Both modes stream replies, and the stop button interrupts the active turn.
+I can rename or export each conversation and set instructions globally or per thread. Export includes provider and model, thread instructions, tool outputs, saved attachment metadata, and MCP context labels while keeping attachment contents private. Both modes stream replies, and the stop button interrupts the active turn.
 
 In either composer, I can attach several files at once or drop them onto the message box. I can remove files individually before sending. Each message can include up to eight files totaling 12 MiB, with up to 1 MiB per UTF-8 text file and 5 MiB per image or PDF. Images and PDFs require a model and endpoint that accept them.
 
