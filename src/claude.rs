@@ -369,3 +369,107 @@ fn append_text(text: &mut String, piece: &str, delta: &mut impl FnMut(&str)) -> 
     delta(piece);
     Ok(())
 }
+
+/// Account details reported by Claude Code. Session credentials stay with the CLI.
+#[derive(Debug, serde::Serialize)]
+pub struct Account {
+    pub connected: bool,
+    pub email: Option<String>,
+    pub organization: Option<String>,
+    pub subscription: Option<String>,
+}
+
+pub async fn account(program: &str, home: &Path, action: &str) -> Result<Account> {
+    ensure!(
+        matches!(action, "status" | "login" | "logout"),
+        "Unknown Claude account action."
+    );
+    std::fs::create_dir_all(home)?;
+    let home = home.canonicalize()?;
+    for operation in if action == "status" {
+        vec!["status"]
+    } else {
+        vec![action, "status"]
+    } {
+        let mut command = Command::new(program);
+        command
+            .env_clear()
+            .env("PATH", process_path())
+            .env("CLAUDE_CONFIG_DIR", &home);
+        if let Some(base) = directories::BaseDirs::new() {
+            command.env("HOME", base.home_dir());
+        }
+        #[cfg(windows)]
+        {
+            ensure!(
+                Path::new(program)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe")),
+                "Use the native Claude Code .exe on Windows."
+            );
+            if let Some(root) = std::env::var_os("SystemRoot") {
+                command.env("SystemRoot", root);
+            }
+        }
+        let scratch = tempfile::Builder::new()
+            .prefix("opendex-claude-auth-")
+            .tempdir()?;
+        command
+            .args(["auth", operation])
+            .current_dir(scratch.path())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        if operation == "status" {
+            use tokio::io::AsyncReadExt;
+            let mut child = command
+                .arg("--json")
+                .stdout(Stdio::piped())
+                .spawn()
+                .context("Could not start Claude Code. Check its executable path.")?;
+            let stdout = child
+                .stdout
+                .take()
+                .context("Claude Code status output unavailable.")?;
+            let bytes = timeout(Duration::from_secs(30), async {
+                let mut bytes = Vec::new();
+                stdout.take(65_537).read_to_end(&mut bytes).await?;
+                ensure!(
+                    bytes.len() <= 65_536,
+                    "Claude Code account status exceeds the size limit."
+                );
+                child.wait().await?;
+                anyhow::Ok(bytes)
+            })
+            .await
+            .context("Claude Code did not report account status.")??;
+            let status: Value = serde_json::from_slice(&bytes)
+                .context("Claude Code returned unreadable account status.")?;
+            let connected = status["loggedIn"]
+                .as_bool()
+                .context("Claude Code returned no sign-in status.")?;
+            ensure!(
+                action != "login" || connected,
+                "Claude Code sign-in did not connect an account."
+            );
+            return Ok(Account {
+                connected,
+                email: status["email"].as_str().map(str::to_owned),
+                organization: status["orgName"].as_str().map(str::to_owned),
+                subscription: status["subscriptionType"].as_str().map(str::to_owned),
+            });
+        }
+        let mut child = command
+            .stdout(Stdio::null())
+            .spawn()
+            .context("Could not start Claude Code. Check its executable path.")?;
+        let status = timeout(Duration::from_secs(300), child.wait())
+            .await
+            .context("Claude Code sign-in timed out. Retry the connection.")??;
+        ensure!(
+            status.success(),
+            "Claude Code could not finish the account action. Complete its browser sign-in and retry."
+        );
+    }
+    bail!("Claude Code returned no account status.")
+}

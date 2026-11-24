@@ -139,6 +139,7 @@ export function settingsPanel(api) {
     const status = el('div', { class: 'form-status', role: 'status' });
     const isAccount = provider.kind === 'chat_gpt_account';
     const anthropic = provider.kind === 'anthropic';
+    const claudePath = input(provider.claude_path ?? 'claude', { spellcheck: 'false', placeholder: 'claude' });
     let anthropicAuth = provider.anthropic_auth ?? 'api';
     form.append(
       field('Adapter', options(Object.entries(adapters).map(([key, [name]]) => [key, name]), provider.kind,
@@ -148,7 +149,11 @@ export function settingsPanel(api) {
     const connectionFields = el('div', { class: 'form-grid wide' });
     function showConnectionFields() {
       connectionFields.replaceChildren();
-      if (isAccount || (anthropic && anthropicAuth === 'account')) return;
+      if (isAccount) return;
+      if (anthropic && anthropicAuth === 'account') {
+        connectionFields.append(field('Claude Code executable', claudePath, 'Install the unmodified Claude Code CLI. Save the connection before signing in.'));
+        return;
+      }
       connectionFields.append(
         field('Base URL', endpoint, 'Include the API prefix, such as /v1 or /api.'),
         field('API key', secret, provider.has_secret ? 'Leave blank to keep the key for this endpoint.' : 'Optional for endpoints that accept unauthenticated requests.'),
@@ -200,6 +205,7 @@ export function settingsPanel(api) {
           token_limit: numberOrNull(tokenLimit.value),
           ollama_think: think === 'default' ? null : think === 'true',
           anthropic_auth: anthropic ? anthropicAuth : 'api',
+          claude_path: claudePath.value,
         };
         const value = { ...provider, ...valuePatch };
         const saved = await api.invoke('save_provider', { value, secret: anthropic && anthropicAuth === 'account' ? null : secret.value || null, forget });
@@ -238,7 +244,7 @@ export function settingsPanel(api) {
           await api.invoke('anthropic_account_connect', { id: provider.id });
           await api.refresh();
           render();
-          api.toast('Anthropic account connected.');
+          api.toast('Claude Code account connected.');
         });
       }, { glyph: 'arrow', style: 'button primary', disabled: provider.has_secret });
       const disconnect = button('Sign out', async () => {
@@ -252,14 +258,15 @@ export function settingsPanel(api) {
       api.invoke('anthropic_account_status', { id: provider.id }).then((result) => {
         const details = [result.email, result.organization, result.subscription].filter(Boolean).join(' · ');
         status.textContent = result.connected ? ['Signed in.', details, result.error].filter(Boolean).join(' ') : 'Not signed in.';
-        connect.disabled = result.connected;
-        disconnect.disabled = !result.connected;
+        connect.disabled = result.connected || provider.has_secret;
+        disconnect.disabled = !result.connected && !provider.has_secret;
+        if (provider.has_secret) status.textContent = 'Sign out of the old account prototype, then reconnect through Claude Code.';
       }).catch((error) => { status.textContent = String(error); });
     }
     actions.append(status);
     return el('div', { class: 'account-panel' },
       el('h4', {}, 'Sign in with Claude'),
-      el('p', { class: 'field-note' }, 'OpenDex opens Anthropic’s sign-in page in your browser and stores only the session keys OpenDex needs. This uses inference and profile access.'),
+      el('p', { class: 'field-note' }, 'Claude Code opens its own browser sign-in and manages the account credentials. OpenDex uses a dedicated CLI configuration for this connection.'),
       actions);
   }
 

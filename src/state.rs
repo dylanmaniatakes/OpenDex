@@ -67,6 +67,12 @@ pub struct Provider {
     pub ollama_think: Option<bool>,
     #[serde(default)]
     pub anthropic_auth: AnthropicAuth,
+    #[serde(default = "default_claude_path")]
+    pub claude_path: String,
+}
+
+fn default_claude_path() -> String {
+    "claude".into()
 }
 
 impl Provider {
@@ -84,6 +90,7 @@ impl Provider {
             token_limit: None,
             ollama_think: None,
             anthropic_auth: AnthropicAuth::Api,
+            claude_path: default_claude_path(),
         }
     }
 
@@ -102,6 +109,10 @@ impl Provider {
     }
 
     pub fn validate(&mut self) -> Result<()> {
+        self.claude_path = self.claude_path.trim().to_owned();
+        if self.claude_path.is_empty() {
+            self.claude_path = default_claude_path();
+        }
         self.name = self.name.trim().into();
         ensure!(!self.name.is_empty(), "Enter a provider name.");
         if self.kind == ProviderKind::ChatGptAccount {

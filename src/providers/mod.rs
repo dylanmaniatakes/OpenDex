@@ -3,8 +3,8 @@
 mod gemini;
 mod wire;
 
+use crate::state::AnthropicAuth;
 use crate::state::{Message, Provider, ProviderKind, ToolCall, endpoint, read_secret};
-use crate::{anthropic, state::AnthropicAuth};
 use anyhow::{Context, Result, bail, ensure};
 use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, Response, header};
@@ -36,26 +36,21 @@ pub fn client() -> Result<Client> {
 }
 
 pub(crate) async fn request(
-    client: &Client,
+    _client: &Client,
     provider: &Provider,
     request: RequestBuilder,
 ) -> Result<RequestBuilder> {
-    let secret = if provider.kind == ProviderKind::Anthropic
-        && provider.anthropic_auth == AnthropicAuth::Account
-    {
-        None
-    } else {
-        read_secret(
-            provider.credential_id(),
-            &provider.endpoint,
-            provider.has_secret,
-        )?
-    };
-    let mut request = request_with_secret(provider, request, secret.as_deref())?;
-    if provider.kind == ProviderKind::Anthropic && provider.anthropic_auth == AnthropicAuth::Account
-    {
-        request = anthropic::request(client, provider, request).await?;
-    }
+    ensure!(
+        provider.kind != ProviderKind::Anthropic
+            || provider.anthropic_auth != AnthropicAuth::Account,
+        "Claude account connections use the installed Claude Code executable."
+    );
+    let secret = read_secret(
+        provider.credential_id(),
+        &provider.endpoint,
+        provider.has_secret,
+    )?;
+    let request = request_with_secret(provider, request, secret.as_deref())?;
     Ok(request)
 }
 
@@ -368,19 +363,15 @@ mod tests {
         assert!(provider.validate().is_err());
     }
 
-    #[test]
-    fn anthropic_account_requests_do_not_require_an_api_key() {
+    #[tokio::test]
+    async fn anthropic_account_requests_never_use_direct_http_authentication() {
         let client = client().unwrap();
-        let url = "http://127.0.0.1:3000";
         let mut provider = Provider::local();
         provider.kind = ProviderKind::Anthropic;
         provider.anthropic_auth = AnthropicAuth::Account;
-
-        let request = request_with_secret(&provider, client.get(url), None)
-            .unwrap()
-            .build()
-            .unwrap();
-        assert!(request.headers().contains_key("anthropic-version"));
-        assert!(!request.headers().contains_key("x-api-key"));
+        let error = request(&client, &provider, client.get("http://127.0.0.1:3000"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("installed Claude Code"));
     }
 }

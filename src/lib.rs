@@ -1,5 +1,4 @@
 pub mod agent;
-pub mod anthropic;
 pub mod backup;
 pub mod claude;
 pub mod codex;

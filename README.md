@@ -24,7 +24,7 @@ In **Model Chat**, I can edit a user message or retry a reply. Both actions crea
 | --- | --- | --- |
 | OpenAI API | `https://api.openai.com/v1` | OpenAI API key. Uses the Responses API. |
 | ChatGPT Account | Installed `codex` executable | Browser sign-in through Codex app-server. Uses eligible Codex models. |
-| Anthropic API | `https://api.anthropic.com/v1` | Anthropic Console key. Uses the Messages API. The account option is an unverified prototype. |
+| Anthropic API | `https://api.anthropic.com/v1` | Console key through the Messages API, or user sign-in through installed Claude Code. Live account verification is pending. |
 | Google Gemini API | `https://generativelanguage.googleapis.com/v1beta` | Google AI Studio API key. Uses native Gemini streaming and function calling. |
 | Ollama Local | `http://127.0.0.1:11434/api` | Local Ollama normally accepts unauthenticated requests. |
 | Ollama Cloud | `https://ollama.com/api` | Ollama API key. |
@@ -36,9 +36,9 @@ For Gemini, I can discover models that support content generation, add model IDs
 
 For a ChatGPT account, I install the [Codex CLI](https://learn.chatgpt.com/docs/cli), add the **ChatGPT Account** adapter, and click **Connect account**. The Codex executable opens the official browser flow and manages its own credentials. OpenDex uses a dedicated Codex home so the connection is independent of my terminal setup. The browser flow and subscribed inference are still part of my live verification checklist. [Codex app-server authentication](https://learn.chatgpt.com/docs/app-server#auth-endpoints)
 
-I use an Anthropic Console API key for Claude through the Messages API. The current **Claude account** option is an unverified prototype that uses direct OAuth and stores session tokens. I have identified that this design conflicts with Anthropic’s documented authentication rules for third-party applications, so I do not consider it ready for release. Anthropic documents an integration route where the user authenticates through an installed, unmodified Claude Code binary. I have started a Rust transport for that route. It initializes an installed Claude Code executable in a dedicated configuration folder, with native tools, hooks, project settings, and external MCP discovery disabled. The transport streams text, accepts saved image and PDF inputs, and exposes OpenDex tools through an in-process MCP server. Tool execution returns through an OpenDex callback. It is not yet connected to the composer or account controls. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+I use an Anthropic Console API key for Claude through the Messages API. For an account connection, I choose **Claude account** under **Anthropic access**, set the installed Claude Code executable path if needed, save, and click **Connect account**. The unmodified CLI opens its own browser sign-in and manages its credentials in a dedicated configuration for the connection. Model discovery and both conversation modes run through that executable. OpenDex's virtual MCP server routes tools through the same permission and persistence layer used by other providers. Native CLI tools, hooks, project settings, and external MCP discovery are disabled. [Anthropic authentication policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
 
-Token parsing checks cover refreshed access tokens, rotated refresh tokens, and retention of saved account details. Those checks validate the prototype’s local data handling. Live account sign-in and inference have not been verified.
+I removed the direct OAuth prototype. If I saved credentials with that prototype, I use **Sign out** to delete them and reconnect through Claude Code. Live browser sign-in and subscribed inference still need verification. Claude Code account sessions stay under the CLI's control and require sign-in again after moving to another computer.
 
 ## Code Agent and permissions
 
@@ -90,7 +90,7 @@ To restore, I open the backup and enter its passphrase. I review the connections
 
 My ChatGPT Account connection and its direct-Keychain session are included when OpenDex finds that session in its dedicated Codex home. The restore preview tells me whether the archive contains a session. Restore writes it to the destination home’s credential entry and rolls back to the previous session if saving settings fails. An expired or revoked session may still require **Connect account**. This currently covers Codex’s direct keyring backend on macOS and Linux. When I restore an archive on Windows, the other settings and keys restore and the preview tells me to sign in to ChatGPT again. Codex’s encrypted secrets-file backend also requires signing in again. I also recreate environment variables used by my provider or MCP settings on the new computer. [Codex credential storage implementation](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/login/src/auth/storage.rs), [Codex storage backend defaults](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/config/src/types.rs)
 
-The archive also includes any Anthropic session data saved by the account prototype. The credential transfer test covers those bytes, while the subscription integration still needs to move to the provider-documented authentication route described above.
+The archive preserves any legacy Anthropic session bytes from the removed prototype so I can restore old archives and then remove those credentials using **Sign out**. They are never used for API requests. New Claude Code account credentials stay with the CLI and are not exported. The executable path and selected models are included in provider settings.
 
 ## Build from source
 
@@ -129,12 +129,11 @@ I tested SearXNG searches and Ollama page retrieval in the macOS app with local 
 
 I tested image generation in both modes with a local Images API fixture. I verified inline Base64 and same-origin URL results, exported a byte-for-byte copy, and confirmed that a regular follow-up still used the original text model. I also stopped a pending generation and reopened its prompt.
 
-I tested the new Claude Code transport against the installed executable without sending an inference prompt or reading subscription credentials. It returned its model list from an isolated configuration folder. Fixtures cover startup arguments, rejection of unexpected native tool requests during startup and generation, unrelated control responses, and malformed or failed initialization. A conversation fixture checks saved context, image and PDF blocks, streamed text without duplicate final output, hidden-tool rejection, and delivery of a denied tool result back to Claude. The installed CLI also initialized with the virtual OpenDex MCP server configured. Live Claude account sign-in and inference remain unverified.
+I tested the new Claude Code transport against the installed executable without sending an inference prompt or reading subscription credentials. It returned its model list from an isolated configuration folder. Fixtures cover startup arguments, rejection of unexpected native tool requests during startup and generation, unrelated control responses, and malformed or failed initialization. A conversation fixture checks saved context, image and PDF blocks, streamed text without duplicate final output, hidden-tool rejection, and delivery of a denied tool result back to Claude. The installed CLI also initialized with the virtual OpenDex MCP server configured. The isolated installed CLI also reported that it was signed out. Account-action fixtures cover login, status, logout, and a logged-out status response with a nonzero exit code. A regression check rejects direct HTTP authentication for account-mode providers. Live Claude account sign-in and inference remain unverified.
 
 ### Source layout
 
 - `src/providers` contains inventory discovery, API payloads, and streaming decoders.
-- `src/anthropic.rs` handles Anthropic account sign-in and session refresh.
 - `src/state.rs` owns the conversation and settings schema, atomic persistence, and credential access.
 - `src/backup.rs` owns encrypted settings export, restore preview, and credential restoration.
 - `src/agent.rs` contains project file tools, command scoping, and Git operations.
@@ -142,7 +141,7 @@ I tested the new Claude Code transport against the installed executable without 
 - `src/web.rs` sends search and page requests to the configured service and normalizes the sources.
 - `src/images.rs` handles image requests, raster input detection, and file export.
 - `src/codex.rs` connects to the optional Codex app server.
-- `src/claude.rs` contains the Claude Code streaming-control and virtual MCP tool transport.
+- `src/claude.rs` handles Claude Code account actions, streaming, and virtual MCP tools.
 - `src/desktop.rs` coordinates turns, approval prompts, and desktop commands.
 - `ui` contains the desktop screens, appearance controls, and Markdown display.
 

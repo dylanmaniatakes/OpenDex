@@ -86,6 +86,10 @@ async fn installed_claude_initializes_without_an_inference_prompt() {
     )
     .await
     .unwrap();
+    let status = opendex::claude::account(&program, &folder.path().join("claude"), "status")
+        .await
+        .unwrap();
+    assert!(!status.connected);
     assert!(
         bridge.initialization()["models"]
             .as_array()
@@ -169,4 +173,63 @@ sys.stdin.read()
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].name, "read_file");
     assert_eq!(calls[0].arguments["path"], "main.rs");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn account_actions_are_owned_by_cli_and_use_dedicated_configuration() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let script = folder.path().join("claude-auth-fixture");
+    std::fs::write(&script, r#"#!/usr/bin/env python3
+import json,os,sys,pathlib
+assert sys.argv[1]=='auth'
+assert not any(key.startswith('ANTHROPIC_') for key in os.environ)
+marker=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])/'fixture-login'
+assert marker.parent.is_absolute()
+assert pathlib.Path.cwd()!=marker.parent
+if sys.argv[2]=='login': marker.touch()
+elif sys.argv[2]=='logout': marker.unlink(missing_ok=True)
+else:
+    assert sys.argv[2:]==['status','--json']
+    print(json.dumps({'loggedIn':marker.exists(),'email':'fixture@example.org','subscriptionType':'test'},indent=2))
+    sys.exit(0 if marker.exists() else 1)
+"#).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = folder.path().join("dedicated-account");
+    let program = script.to_str().unwrap();
+    assert!(
+        !opendex::claude::account(program, &home, "status")
+            .await
+            .unwrap()
+            .connected
+    );
+    let logged_in = opendex::claude::account(program, &home, "login")
+        .await
+        .unwrap();
+    assert!(logged_in.connected);
+    assert_eq!(logged_in.email.as_deref(), Some("fixture@example.org"));
+    assert!(
+        !opendex::claude::account(program, &home, "logout")
+            .await
+            .unwrap()
+            .connected
+    );
+    assert!(
+        opendex::claude::account(program, &home, "unknown")
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn provider_executable_path_defaults_and_survives_serialization() {
+    let mut value = serde_json::to_value(opendex::state::Provider::local()).unwrap();
+    value.as_object_mut().unwrap().remove("claude_path");
+    let mut provider: opendex::state::Provider = serde_json::from_value(value).unwrap();
+    assert_eq!(provider.claude_path, "claude");
+    provider.claude_path = "/Applications/Custom Tools/claude".into();
+    let restored: opendex::state::Provider =
+        serde_json::from_str(&serde_json::to_string(&provider).unwrap()).unwrap();
+    assert_eq!(restored.claude_path, provider.claude_path);
 }

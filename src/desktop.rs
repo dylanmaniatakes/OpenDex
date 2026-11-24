@@ -2,7 +2,7 @@
 //! The webview handles presentation and user input.
 use crate::{
     agent::{self, Capability},
-    anthropic, backup, codex, images,
+    backup, claude, codex, images,
     mcp::{self, Connection},
     providers::{self, Tool},
     state::{
@@ -38,6 +38,7 @@ struct Desktop {
     workspaces: Mutex<HashSet<PathBuf>>,
     approvals: Mutex<HashMap<Uuid, oneshot::Sender<bool>>>,
     codex_lock: AsyncMutex<()>,
+    claude_lock: AsyncMutex<()>,
     backup_lock: AsyncMutex<()>,
 }
 
@@ -204,6 +205,23 @@ async fn discover_models(app: AppState<'_>, id: Uuid) -> Reply<Vec<String>> {
                     .context("The ChatGPT connection is busy.")?;
                 let mut bridge = codex::Bridge::start(&data.codex_path, &app.codex_home).await?;
                 return bridge.models().await;
+            }
+            if provider.kind == ProviderKind::Anthropic
+                && provider.anthropic_auth == AnthropicAuth::Account
+            {
+                let home = app
+                    .codex_home
+                    .parent()
+                    .context("Missing app data folder.")?
+                    .join("claude")
+                    .join(provider.id.to_string());
+                let bridge = claude::Bridge::start(&provider.claude_path, &home).await?;
+                return Ok(bridge.initialization()["models"]
+                    .as_array()
+                    .context("Claude Code returned no model list.")?
+                    .iter()
+                    .filter_map(|model| model["value"].as_str().map(str::to_owned))
+                    .collect());
             }
             providers::discover(&app.client, provider).await
         }
@@ -632,59 +650,90 @@ fn new_thread(app: AppState<'_>, mode: Mode, project: Option<Uuid>) -> Reply<Thr
     }))
 }
 
+fn claude_home(app: &Desktop, provider: &Provider) -> Result<PathBuf> {
+    ensure!(
+        provider.kind == ProviderKind::Anthropic
+            && provider.anthropic_auth == AnthropicAuth::Account,
+        "Save this connection in Claude account mode first."
+    );
+    Ok(app
+        .codex_home
+        .parent()
+        .context("Missing app data folder.")?
+        .join("claude")
+        .join(provider.id.to_string()))
+}
+
 #[tauri::command]
-async fn anthropic_account_status(app: AppState<'_>, id: Uuid) -> Reply<anthropic::Account> {
+async fn anthropic_account_status(app: AppState<'_>, id: Uuid) -> Reply<claude::Account> {
     reply(
         async {
             let data = app.store.snapshot();
             let provider = provider(&data, id)?;
-            anthropic::account_status(provider).await
+            claude::account(
+                &provider.claude_path,
+                &claude_home(&app, provider)?,
+                "status",
+            )
+            .await
         }
         .await,
     )
 }
 
 #[tauri::command]
-async fn anthropic_account_connect(app: AppState<'_>, id: Uuid) -> Reply<anthropic::Account> {
+async fn anthropic_account_connect(app: AppState<'_>, id: Uuid) -> Reply<claude::Account> {
     reply(
         async {
-            let provider = {
-                let data = app.store.snapshot();
-                provider(&data, id)?.clone()
-            };
-            let (provider, account) = anthropic::connect(&app.client, provider).await?;
-            app.store.change(|data| {
-                let matched = data
-                    .providers
-                    .iter_mut()
-                    .find(|item| item.id == id)
-                    .context("That provider no longer exists.")?;
-                *matched = provider.clone();
-                matched.validate()?;
-                Ok(())
-            })?;
-            Ok(account)
+            let _lock = app
+                .claude_lock
+                .try_lock()
+                .context("The Claude connection is busy.")?;
+            let data = app.store.snapshot();
+            let provider = provider(&data, id)?;
+            ensure!(
+                !provider.has_secret,
+                "Sign out of the old account prototype before connecting Claude Code."
+            );
+            claude::account(
+                &provider.claude_path,
+                &claude_home(&app, provider)?,
+                "login",
+            )
+            .await
         }
         .await,
     )
 }
 
 #[tauri::command]
-async fn anthropic_account_disconnect(app: AppState<'_>, id: Uuid) -> Reply<anthropic::Account> {
+async fn anthropic_account_disconnect(app: AppState<'_>, id: Uuid) -> Reply<claude::Account> {
     reply(
         async {
-            let provider = {
-                let data = app.store.snapshot();
-                provider(&data, id)?.clone()
-            };
-            let provider = anthropic::disconnect(&provider)?;
-            app.store.change(|data| {
-                if let Some(item) = data.providers.iter_mut().find(|item| item.id == id) {
-                    *item = provider.clone();
-                }
-                Ok(())
-            })?;
-            anthropic::account_status(&provider).await
+            let _lock = app
+                .claude_lock
+                .try_lock()
+                .context("The Claude connection is busy.")?;
+            let data = app.store.snapshot();
+            let provider = provider(&data, id)?;
+            let home = claude_home(&app, provider)?;
+            if provider.has_secret {
+                delete_secret(provider.credential_id(), &provider.endpoint)?;
+                app.store.change(|data| {
+                    if let Some(item) = data.providers.iter_mut().find(|item| item.id == id) {
+                        item.has_secret = false;
+                        item.secret_ref = None;
+                    }
+                    Ok(())
+                })?;
+                return Ok(claude::Account {
+                    connected: false,
+                    email: None,
+                    organization: None,
+                    subscription: None,
+                });
+            }
+            claude::account(&provider.claude_path, &home, "logout").await
         }
         .await,
     )
@@ -1364,6 +1413,54 @@ async fn complete_turn(
         message.model = Some(model);
         message.provider = Some(provider.id);
         turn.checkpoint(message)
+    } else if provider.kind == ProviderKind::Anthropic
+        && provider.anthropic_auth == AnthropicAuth::Account
+    {
+        let _lock = turn
+            .app
+            .claude_lock
+            .try_lock()
+            .context("The Claude connection is busy.")?;
+        ensure!(
+            !provider.has_secret,
+            "Sign out of the old Claude account prototype and reconnect through Claude Code."
+        );
+        let home = claude_home(&turn.app, &provider)?;
+        let mut bridge =
+            claude::Bridge::start_turn(&provider.claude_path, &home, Some(&model), &system, &tools)
+                .await?;
+        let session_lock = AsyncMutex::new(&mut session);
+        let text = bridge
+            .generate(
+                &messages,
+                |piece| {
+                    turn.delta(piece);
+                },
+                |call| {
+                    let lock = &session_lock;
+                    let context = &turn;
+                    async move {
+                        let mut session = lock.lock().await;
+                        let label = session.tool_label(&call.name);
+                        let (allowed, output) = session.call(&call).await;
+                        let mut message = Message::new(Role::Tool, &output);
+                        message.tool_label = Some(label);
+                        message.tool_name = Some(call.name);
+                        message.tool_id = Some(call.id);
+                        match context.append(message) {
+                            Ok(()) => (allowed, output),
+                            Err(error) => {
+                                (false, format!("Could not save the tool result: {error:#}"))
+                            }
+                        }
+                    }
+                },
+            )
+            .await?;
+        let mut message = Message::new(Role::Assistant, text);
+        message.model = Some(model);
+        message.provider = Some(provider.id);
+        turn.checkpoint(message)
     } else {
         async {
             for step in 0..=turn.rules.max_steps {
@@ -1740,6 +1837,7 @@ pub fn run() {
                 workspaces: Mutex::new(HashSet::new()),
                 approvals: Mutex::new(HashMap::new()),
                 codex_lock: AsyncMutex::new(()),
+                claude_lock: AsyncMutex::new(()),
                 backup_lock: AsyncMutex::new(()),
             }));
             Ok(())
