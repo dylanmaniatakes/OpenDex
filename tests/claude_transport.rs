@@ -38,6 +38,7 @@ assert '--no-session-persistence' in args
 assert json.loads(args[args.index('--mcp-config')+1]) == {'mcpServers':{}}
 assert json.loads(args[args.index('--settings')+1])['disableAllHooks'] is True
 assert os.path.isabs(os.environ['CLAUDE_CONFIG_DIR'])
+assert os.environ.get('USER') and os.environ.get('LOGNAME')
 assert os.getcwd() != os.environ['CLAUDE_CONFIG_DIR']
 assert not any(key.startswith('ANTHROPIC_') for key in os.environ)
 request = json.loads(sys.stdin.readline())

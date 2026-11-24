@@ -12,12 +12,15 @@ async fn fatal_tool_callback_stops_codex_before_later_requests_are_executed() {
     let folder = tempfile::tempdir().unwrap();
     let script = folder.path().join("codex-fixture");
     std::fs::write(&script,r#"#!/usr/bin/env python3
-import json,sys
+import os,sys,json
 def send(value): print(json.dumps(value),flush=True)
 for line in sys.stdin:
     request=json.loads(line)
     method=request.get('method')
-    if method=='initialize': result={}
+    if method=='initialize':
+        assert os.environ.get('USER') and os.environ.get('LOGNAME')
+        assert os.environ['CODEX_HOME']
+        result={}
     elif method=='account/read': result={'account':{'type':'chatgpt','email':'fixture@example.org'}}
     elif method=='thread/start':
         assert request['params']['dynamicTools'][0]['name']=='fixture_tool'

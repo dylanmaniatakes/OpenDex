@@ -66,6 +66,12 @@ impl Bridge {
         if let Some(base) = directories::BaseDirs::new() {
             command.env("HOME", base.home_dir());
         }
+        // The CLI keychain lookup resolves its account by username.
+        for key in ["USER", "LOGNAME"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
         #[cfg(windows)]
         if let Some(root) = std::env::var_os("SystemRoot") {
             command.env("SystemRoot", root);
@@ -398,6 +404,12 @@ pub async fn account(program: &str, home: &Path, action: &str) -> Result<Account
             .env("CLAUDE_CONFIG_DIR", &home);
         if let Some(base) = directories::BaseDirs::new() {
             command.env("HOME", base.home_dir());
+        }
+        // The CLI keychain lookup resolves its account by username.
+        for key in ["USER", "LOGNAME"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
         }
         #[cfg(windows)]
         {
