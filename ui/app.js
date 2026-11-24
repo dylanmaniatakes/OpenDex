@@ -1,4 +1,5 @@
 import { $, button, check, el, field, markdown, options } from './dom.js';
+import { matchesHistory } from './history-search.js';
 import { icon } from './icons.js';
 import { mcpContextPicker } from './mcp-context.js';
 import { settingsPanel, permissionName } from './settings.js';
@@ -164,7 +165,7 @@ function conversationButton(thread, nested = false) {
 }
 
 function projectGroup(project, threads) {
-  const expanded = !collapsedProjects.has(project.id);
+  const expanded = Boolean($('history-search').value.trim()) || !collapsedProjects.has(project.id);
   const currentProject = current()?.project_id === project.id;
   const nestedId = 'project-threads-' + project.id;
   const toggle = el('button', {
@@ -238,16 +239,19 @@ function navigation() {
   $('new-thread').title = mode === 'agent' ? 'Add project' : 'New conversation';
   $('new-thread').setAttribute('aria-label', $('new-thread').title);
 
-  const visible = data.threads.filter((thread) => thread.mode === mode).toReversed();
+  const query = $('history-search').value;
+  const projects = new Map(data.projects.map((project) => [project.id, project]));
+  const visible = data.threads.filter((thread) => thread.mode === mode && matchesHistory(thread, projects.get(thread.project_id), query)).toReversed();
   const items = mode === 'chat' ? visible.map((thread) => conversationButton(thread)) : [
-    ...data.projects.map((project) => projectGroup(project, visible.filter((thread) => thread.project_id === project.id))),
+    ...data.projects.filter((project) => matchesHistory(null, project, query) || visible.some((thread) => thread.project_id === project.id))
+      .map((project) => projectGroup(project, visible.filter((thread) => thread.project_id === project.id))),
     ...visible.some((thread) => !thread.project_id) ? [
       el('div', { class: 'unassigned-heading' }, 'No project'),
       ...visible.filter((thread) => !thread.project_id).map((thread) => conversationButton(thread)),
     ] : [],
   ];
   $('history').replaceChildren(...items);
-  if (!items.length) $('history').append(el('p', { class: 'muted' }, mode === 'agent' ? 'No projects yet.' : 'No conversations yet.'));
+  if (!items.length) $('history').append(el('p', { class: 'muted' }, query.trim() ? 'No matching conversations or projects.' : mode === 'agent' ? 'No projects yet.' : 'No conversations yet.'));
   $('provider-summary').textContent = data.providers.length
     ? `${data.providers.length} provider${data.providers.length === 1 ? '' : 's'} configured`
     : 'Add a provider';
@@ -976,6 +980,14 @@ function bind() {
     const draft = draftOf();
     draft.text = event.target.value;
     if (draft.error || draft.notice) { draft.error = null; draft.notice = null; status(); }
+  });
+  $('history-search').addEventListener('input', navigation);
+  $('history-search').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.target.value = '';
+      navigation();
+    }
   });
   $('prompt').addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {

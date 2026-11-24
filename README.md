@@ -10,6 +10,8 @@ I built OpenDex to use the models I choose for everyday chat and coding. It runs
 4. Use **Discover models** to browse an endpoint’s inventory, or paste model IDs one per line and choose **Add models**. Duplicate IDs are removed. Each model I add appears in both modes. Ollama Cloud has its own searchable catalog and uses an Ollama API key.
 5. Use the sidebar dropdown to switch between **Model Chat** and **Code Agent**. Model Chat shows its conversations. In Code Agent, use **Add project** to choose a folder, then use the plus button beside a project to create another thread in it.
 
+I can search saved conversation titles, message text, and project names from the sidebar. Search stays on my computer and filters the selected mode. In Code Agent, matching project groups expand while I search. Escape clears the query.
+
 I can rename or export each conversation and set instructions globally or per thread. Both modes stream replies, and the stop button interrupts the active turn.
 
 In either composer, I can attach several files at once or drop them onto the message box. I can remove files individually before sending. Each message can include up to eight files totaling 12 MiB, with up to 1 MiB per UTF-8 text file and 5 MiB per image or PDF. Images and PDFs require a model and endpoint that accept them.
@@ -104,6 +106,7 @@ bash scripts/bundle-macos.sh
 The bundling script writes `dist/OpenDex.app` and applies a local ad-hoc signature. Finder can launch the preview on the Mac that built it. Developer ID signing and notarization are release tasks. The Rust and Tauri code leave room for Windows and Linux builds. I have tested the desktop on Apple Silicon macOS and scoped command isolation is implemented for macOS.
 
 ```sh
+node --test tests/history_search.mjs
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
