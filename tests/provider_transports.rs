@@ -552,3 +552,195 @@ async fn a_resource_only_message_reaches_chat_completions() {
     assert_eq!(result.text, "Received resource");
     fixture.finish();
 }
+
+#[tokio::test]
+async fn native_gemini_discovers_chat_models_across_pages() {
+    let fixture = Fixture::new(2, |request| {
+        assert!(request.headers.contains("x-gemini-fixture:"));
+        let body = match request.line.trim() {
+            "GET /api-prefix/models HTTP/1.1" => json!({
+                "models": [
+                    {"name":"models/gemini-fixture-flash","supportedGenerationMethods":["generateContent","countTokens"]},
+                    {"name":"models/gemini-fixture-embed","supportedGenerationMethods":["embedContent"]}
+                ],
+                "nextPageToken":"page/2"
+            }),
+            "GET /api-prefix/models?pageToken=page%2F2 HTTP/1.1" => json!({
+                "models": [
+                    {"name":"models/gemini-fixture-pro","supportedGenerationMethods":["generateContent"]},
+                    {"name":"models/gemini-fixture-flash","supportedGenerationMethods":["generateContent"]}
+                ]
+            }),
+            path => panic!("unexpected catalog route {path}"),
+        };
+        ("application/json", String::new(), body.to_string())
+    });
+    let mut connection = provider(&fixture, ProviderKind::Gemini);
+    connection.headers = vec![("x-gemini-fixture".into(), "PATH".into())];
+    let models = providers::discover(&providers::client().unwrap(), &connection)
+        .await
+        .unwrap();
+    assert_eq!(models, ["gemini-fixture-flash", "gemini-fixture-pro"]);
+    fixture.finish();
+}
+
+#[tokio::test]
+async fn native_gemini_replays_signed_parallel_and_sequential_calls() {
+    let first_call = json!({"functionCall":{"id":"native-one","name":"read_file","args":{"path":"first.txt"}},
+                           "thoughtSignature":"c2lnbmF0dXJlLW9uZQ=="});
+    let second_call = json!({"functionCall":{"name":"read_file","args":{"path":"second.txt"}}});
+    let third_call = json!({"functionCall":{"name":"read_file","args":{"path":"third.txt"}},
+                           "thoughtSignature":"c2lnbmF0dXJlLXRocmVl"});
+    let model_parts = [first_call, second_call, third_call];
+    let server_parts = model_parts.clone();
+
+    let fixture = Fixture::new(3, move |request| {
+        assert_eq!(
+            request.line.trim(),
+            "POST /api-prefix/models/gemini-fixture:streamGenerateContent?alt=sse HTTP/1.1"
+        );
+        assert!(request.headers.contains("x-gemini-fixture:"));
+        assert_eq!(
+            request.body["systemInstruction"]["parts"][0]["text"],
+            "Use the selected workspace."
+        );
+        assert_eq!(request.body["generationConfig"]["maxOutputTokens"], 2048);
+        assert_eq!(
+            request.body["tools"][0]["functionDeclarations"][0]["parametersJsonSchema"]["type"],
+            "object"
+        );
+        let contents = request.body["contents"].as_array().unwrap();
+        assert_eq!(contents[0]["role"], "user");
+        assert!(
+            contents[0]["parts"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Compare these files.")
+        );
+        assert_eq!(
+            contents[0]["parts"][1]["inlineData"]["mimeType"],
+            "application/pdf"
+        );
+        assert_eq!(contents[0]["parts"][1]["inlineData"]["data"], "JVBERg==");
+        let candidate = |parts: Value| json!({"candidates":[{"content":{"role":"model","parts":parts},"index":0}]});
+        let finish = json!({"candidates":[{"index":0,"finishReason":"STOP"}]});
+        let chunks = match contents.len() {
+            1 => vec![
+                candidate(json!([{"text":"Thought summary","thought":true}, server_parts[0]])),
+                candidate(json!([server_parts[1]])),
+                finish,
+            ],
+            3 | 5 => {
+                assert_eq!(contents[1]["parts"][1], server_parts[0]);
+                assert_eq!(contents[1]["parts"][2], server_parts[1]);
+                assert_eq!(contents[2]["role"], "user");
+                let results = contents[2]["parts"].as_array().unwrap();
+                assert_eq!(results.len(), 2);
+                assert_eq!(results[0]["functionResponse"]["id"], "native-one");
+                assert!(results[1]["functionResponse"].get("id").is_none());
+                assert_eq!(
+                    results[1]["functionResponse"]["response"]["output"],
+                    "second output"
+                );
+                if contents.len() == 3 {
+                    vec![candidate(json!([server_parts[2]])), finish]
+                } else {
+                    assert_eq!(contents[3]["parts"][0], server_parts[2]);
+                    assert_eq!(
+                        contents[4]["parts"][0]["functionResponse"]["response"]["output"],
+                        "third output"
+                    );
+                    vec![
+                        candidate(json!([{"text":"Checked "}])),
+                        candidate(json!([{"text":"three files."}])),
+                        finish,
+                    ]
+                }
+            }
+            size => panic!("unexpected Gemini history length {size}"),
+        };
+        ("text/event-stream", String::new(), response(&chunks))
+    });
+
+    let mut connection = provider(&fixture, ProviderKind::Gemini);
+    connection.headers = vec![("x-gemini-fixture".into(), "PATH".into())];
+    connection.token_limit = Some(2048);
+    let client = providers::client().unwrap();
+    let spec = [tool()];
+    let mut user = Message::new(Role::User, "Compare these files.");
+    user.attachment = Some(opendex::state::Attachment {
+        name: "notes.pdf".into(),
+        text: "JVBERg==".into(),
+        media_type: Some("application/pdf".into()),
+    });
+    let mut history = vec![user];
+    for outputs in [
+        &["first output", "second output"][..],
+        &["third output"][..],
+    ] {
+        let completion = providers::generate(
+            &client,
+            &connection,
+            "models/gemini-fixture",
+            "Use the selected workspace.",
+            &history,
+            &spec,
+            |_| panic!("unexpected text delta"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completion.calls.len(), outputs.len());
+        let mut model = Message::new(Role::Assistant, completion.text);
+        model.calls = completion.calls.clone();
+        model.output_items = completion.output_items;
+        history.push(model);
+        for (call, output) in completion.calls.into_iter().zip(outputs) {
+            let mut result = Message::new(Role::Tool, *output);
+            result.tool_id = Some(call.id);
+            result.tool_name = Some(call.name);
+            history.push(result);
+        }
+    }
+
+    let mut streamed = String::new();
+    let final_reply = providers::generate(
+        &client,
+        &connection,
+        "gemini-fixture",
+        "Use the selected workspace.",
+        &history,
+        &spec,
+        |text| streamed.push_str(text),
+    )
+    .await
+    .unwrap();
+    assert_eq!(streamed, "Checked three files.");
+    assert_eq!(final_reply.text, streamed);
+    assert!(final_reply.calls.is_empty());
+    fixture.finish();
+}
+
+#[tokio::test]
+async fn native_gemini_requires_a_completed_tool_stream() {
+    let fixture = Fixture::new(1, |_| {
+        let incomplete = json!({"candidates":[{"content":{"parts":[
+            {"functionCall":{"name":"read_file","args":{"path":"sample.txt"}}}
+        ]}}]});
+        ("text/event-stream", String::new(), response(&[incomplete]))
+    });
+    let mut connection = provider(&fixture, ProviderKind::Gemini);
+    connection.headers = vec![("x-gemini-fixture".into(), "PATH".into())];
+    let error = providers::generate(
+        &providers::client().unwrap(),
+        &connection,
+        "gemini-fixture",
+        "",
+        &[Message::new(Role::User, "Read the sample.")],
+        &[tool()],
+        |_| {},
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("before reporting completion"));
+    fixture.finish();
+}

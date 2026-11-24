@@ -193,6 +193,7 @@ pub(super) fn payload(
             }
             (if ollama { "chat" } else { "chat/completions" }, body)
         }
+        Kind::Gemini => bail!("Use the native Gemini endpoint."),
         Kind::ChatGptAccount => bail!("Use the ChatGPT account connection."),
     };
     // A missing optional argument is represented by omitting its field in each format above.
@@ -377,6 +378,7 @@ impl Decoder {
                     self.finish();
                 }
             }
+            Kind::Gemini => bail!("Use the native Gemini stream."),
             Kind::ChatGptAccount => bail!("Unsupported account stream."),
         }
         ensure!(

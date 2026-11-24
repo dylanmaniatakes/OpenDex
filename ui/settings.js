@@ -7,6 +7,7 @@ const adapters = {
   open_ai: ['OpenAI API', 'https://api.openai.com/v1'],
   chat_gpt_account: ['ChatGPT Account', ''],
   anthropic: ['Anthropic API', 'https://api.anthropic.com/v1'],
+  gemini: ['Google Gemini API', 'https://generativelanguage.googleapis.com/v1beta'],
   open_ai_compatible: ['OpenAI-compatible', 'http://127.0.0.1:1234/v1'],
 };
 
@@ -121,6 +122,8 @@ export function settingsPanel(api) {
     const secret = input('', {
       type: 'password', autocomplete: 'off', placeholder: provider.has_secret ? 'Saved in system credential store' : 'Paste API key',
     });
+    const defaultKeyHeader = { anthropic: 'x-api-key', gemini: 'x-goog-api-key' }[provider.kind] ?? 'Authorization: Bearer';
+    const keyHeader = input(provider.api_key_header ?? '', { spellcheck: 'false', placeholder: defaultKeyHeader, maxlength: 128 });
     const tokenLimit = input(provider.token_limit, { type: 'number', min: 1, max: 1000000, placeholder: 'Adapter default' });
     let think = provider.ollama_think == null ? 'default' : String(provider.ollama_think);
     const ollama = provider.kind === 'ollama' || provider.kind === 'ollama_cloud';
@@ -140,6 +143,7 @@ export function settingsPanel(api) {
         field('API key', secret, provider.has_secret ? 'Leave blank to keep the key for this endpoint.' : 'Optional for endpoints that accept unauthenticated requests.'),
         el('details', { class: 'wide inset' }, el('summary', {}, 'Advanced connection settings'),
           el('div', { class: 'form-grid compact' }, field('Output token limit', tokenLimit),
+            field('API key header', keyHeader, 'Leave blank for the adapter default. A custom header receives the saved key as entered.'),
             field('Headers from environment', headers, 'One header per line. Use HEADER_NAME=ENVIRONMENT_VARIABLE.'),
             ollama && field('Model thinking', options([['default', 'Model default'], ['true', 'On'], ['false', 'Off']], think, (value) => { think = value; })))),
       );
@@ -167,7 +171,7 @@ export function settingsPanel(api) {
           if (at < 1) throw new Error('Use HEADER_NAME=ENVIRONMENT_VARIABLE for each header.');
           return [line.slice(0, at).trim(), line.slice(at + 1).trim()];
         });
-        const value = { ...provider, name: name.value, endpoint: endpoint.value, headers: headerPairs, token_limit: numberOrNull(tokenLimit.value), ollama_think: think === 'default' ? null : think === 'true' };
+        const value = { ...provider, name: name.value, endpoint: endpoint.value, api_key_header: keyHeader.value.trim() || null, headers: headerPairs, token_limit: numberOrNull(tokenLimit.value), ollama_think: think === 'default' ? null : think === 'true' };
         const saved = await api.invoke('save_provider', { value, secret: secret.value || null, forget });
         selectedProvider = saved.id; newProviderKind = null; catalogSearch = '';
         await api.refresh();

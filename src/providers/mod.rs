@@ -1,5 +1,6 @@
 //! Provider adapters share a tool and transcript representation. Each adapter owns its
 //! request/stream formats so its native API remains usable through gateways.
+mod gemini;
 mod wire;
 
 use crate::state::{Message, Provider, ProviderKind, ToolCall, endpoint, read_secret};
@@ -34,11 +35,21 @@ pub fn client() -> Result<Client> {
 }
 
 fn request(provider: &Provider, request: RequestBuilder) -> Result<RequestBuilder> {
-    let mut request = request;
     let secret = read_secret(provider.id, &provider.endpoint, provider.has_secret)?;
+    request_with_secret(provider, request, secret.as_deref())
+}
+
+fn request_with_secret(
+    provider: &Provider,
+    mut request: RequestBuilder,
+    secret: Option<&str>,
+) -> Result<RequestBuilder> {
     if matches!(
         provider.kind,
-        ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::OllamaCloud
+        ProviderKind::OpenAi
+            | ProviderKind::Anthropic
+            | ProviderKind::Gemini
+            | ProviderKind::OllamaCloud
     ) && secret.is_none()
         && provider.headers.is_empty()
     {
@@ -48,10 +59,18 @@ fn request(provider: &Provider, request: RequestBuilder) -> Result<RequestBuilde
         request = request.header("anthropic-version", "2023-06-01");
     }
     if let Some(secret) = secret {
-        let mut value = header::HeaderValue::from_str(&secret).context("Invalid key format.")?;
-        value.set_sensitive(true);
-        request = if provider.kind == ProviderKind::Anthropic {
-            request.header("x-api-key", value)
+        let name = provider.key_header().unwrap_or("authorization");
+        ensure!(
+            !provider
+                .headers
+                .iter()
+                .any(|(header, _)| header.eq_ignore_ascii_case(name)),
+            "The API key header {name} is also configured through an environment variable."
+        );
+        request = if let Some(header) = provider.key_header() {
+            let mut value = header::HeaderValue::from_str(secret).context("Invalid key format.")?;
+            value.set_sensitive(true);
+            request.header(header, value)
         } else {
             request.bearer_auth(secret)
         };
@@ -70,6 +89,9 @@ fn request(provider: &Provider, request: RequestBuilder) -> Result<RequestBuilde
 }
 
 pub async fn discover(client: &Client, provider: &Provider) -> Result<Vec<String>> {
+    if provider.kind == ProviderKind::Gemini {
+        return gemini::discover(client, provider).await;
+    }
     let mut base = endpoint(&provider.endpoint)?;
     let suffix = match provider.kind {
         ProviderKind::Ollama | ProviderKind::OllamaCloud => "tags",
@@ -131,6 +153,9 @@ pub async fn generate(
     tools: &[Tool],
     mut delta: impl FnMut(&str),
 ) -> Result<Completion> {
+    if provider.kind == ProviderKind::Gemini {
+        return gemini::generate(client, provider, model, system, messages, tools, delta).await;
+    }
     let (path, payload) = wire::payload(provider, model, system, messages, tools)?;
     let mut url = endpoint(&provider.endpoint)?;
     url.path_segments_mut()
@@ -281,4 +306,45 @@ pub(crate) async fn checked(response: Response) -> Result<Response> {
         bail!("Endpoint returned HTTP {status}.");
     }
     bail!("Endpoint returned HTTP {status}: {message}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_keys_use_sensitive_adapter_or_custom_headers() {
+        let client = client().unwrap();
+        let url = "http://127.0.0.1:3000";
+        let mut provider = Provider {
+            kind: ProviderKind::Gemini,
+            ..Provider::local()
+        };
+
+        let default = request_with_secret(&provider, client.get(url), Some("example-key"))
+            .unwrap()
+            .build()
+            .unwrap();
+        let google_key = default.headers().get("x-goog-api-key").unwrap();
+        assert_eq!(google_key, "example-key");
+        assert!(google_key.is_sensitive());
+        assert!(!default.headers().contains_key("authorization"));
+
+        provider.api_key_header = Some(" X-Gateway-Key ".into());
+        provider.validate().unwrap();
+        let custom = request_with_secret(&provider, client.get(url), Some("example-key"))
+            .unwrap()
+            .build()
+            .unwrap();
+        let gateway_key = custom.headers().get("x-gateway-key").unwrap();
+        assert_eq!(gateway_key, "example-key");
+        assert!(gateway_key.is_sensitive());
+        assert!(!custom.headers().contains_key("x-goog-api-key"));
+
+        provider.headers = vec![("X-Gateway-Key".into(), "PATH".into())];
+        assert!(request_with_secret(&provider, client.get(url), Some("example-key")).is_err());
+
+        provider.api_key_header = Some("Host".into());
+        assert!(provider.validate().is_err());
+    }
 }

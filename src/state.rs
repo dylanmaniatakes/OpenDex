@@ -16,6 +16,7 @@ pub enum ProviderKind {
     OpenAi,
     OpenAiCompatible,
     Anthropic,
+    Gemini,
     Ollama,
     OllamaCloud,
     ChatGptAccount,
@@ -27,6 +28,7 @@ impl ProviderKind {
             Self::OpenAi => "https://api.openai.com/v1",
             Self::OpenAiCompatible => "http://127.0.0.1:1234/v1",
             Self::Anthropic => "https://api.anthropic.com/v1",
+            Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
             Self::Ollama => "http://127.0.0.1:11434/api",
             Self::OllamaCloud => "https://ollama.com/api",
             Self::ChatGptAccount => "",
@@ -43,6 +45,8 @@ pub struct Provider {
     pub models: Vec<String>,
     #[serde(default)]
     pub has_secret: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_header: Option<String>,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
     #[serde(default)]
@@ -60,10 +64,19 @@ impl Provider {
             endpoint: ProviderKind::Ollama.endpoint().into(),
             models: vec![],
             has_secret: false,
+            api_key_header: None,
             headers: vec![],
             token_limit: None,
             ollama_think: None,
         }
+    }
+
+    pub fn key_header(&self) -> Option<&str> {
+        self.api_key_header.as_deref().or(match self.kind {
+            ProviderKind::Anthropic => Some("x-api-key"),
+            ProviderKind::Gemini => Some("x-goog-api-key"),
+            _ => None,
+        })
     }
 
     pub fn validate(&mut self) -> Result<()> {
@@ -71,23 +84,29 @@ impl Provider {
         ensure!(!self.name.is_empty(), "Enter a provider name.");
         if self.kind == ProviderKind::ChatGptAccount {
             self.endpoint.clear();
+            self.api_key_header = None;
             self.headers.clear();
         } else {
             self.endpoint = self.endpoint.trim().trim_end_matches('/').into();
             endpoint(&self.endpoint)?;
+            self.api_key_header = self
+                .api_key_header
+                .take()
+                .map(|name| name.trim().to_ascii_lowercase())
+                .filter(|name| !name.is_empty());
+            if let Some(name) = &self.api_key_header {
+                validate_request_header(name)?;
+            }
+            let mut seen = std::collections::HashSet::new();
             for (name, variable) in &self.headers {
-                reqwest::header::HeaderName::from_bytes(name.as_bytes())?;
+                let name = validate_request_header(name)?;
                 ensure!(
-                    !matches!(
-                        name.to_ascii_lowercase().as_str(),
-                        "authorization"
-                            | "x-api-key"
-                            | "host"
-                            | "content-type"
-                            | "content-length"
-                            | "transfer-encoding"
-                    ),
-                    "Header {name} is managed by the adapter."
+                    !matches!(name.as_str(), "authorization" | "x-api-key"),
+                    "Use the API key and key header fields for {name}."
+                );
+                ensure!(
+                    seen.insert(name),
+                    "A request header is configured more than once."
                 );
                 validate_env(variable)?;
             }
@@ -96,6 +115,27 @@ impl Provider {
         ensure!(self.token_limit != Some(0), "Token limit must be positive.");
         Ok(())
     }
+}
+
+fn validate_request_header(name: &str) -> Result<reqwest::header::HeaderName> {
+    let header = reqwest::header::HeaderName::from_bytes(name.as_bytes())?;
+    ensure!(
+        !matches!(
+            header.as_str(),
+            "host"
+                | "content-type"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "upgrade"
+                | "te"
+                | "trailer"
+                | "proxy-authorization"
+                | "expect"
+        ),
+        "Header {name} is managed by the HTTP client."
+    );
+    Ok(header)
 }
 
 pub fn normalize_models(models: &mut Vec<String>) -> Result<()> {
@@ -365,7 +405,7 @@ pub struct Message {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub calls: Vec<ToolCall>,
-    /// Responses reasoning items only exist for the duration of the tool loop.
+    /// Native provider output exists only for the duration of the tool loop.
     #[serde(skip)]
     pub output_items: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

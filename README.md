@@ -19,11 +19,14 @@ I can rename or export each conversation, attach a file, and set instructions gl
 | OpenAI API | `https://api.openai.com/v1` | OpenAI API key. Uses the Responses API. |
 | ChatGPT Account | Installed `codex` executable | Browser sign-in through Codex app-server. Uses eligible Codex models. |
 | Anthropic API | `https://api.anthropic.com/v1` | Anthropic Console key. Uses the Messages API. |
+| Google Gemini API | `https://generativelanguage.googleapis.com/v1beta` | Google AI Studio API key. Uses native Gemini streaming and function calling. |
 | Ollama Local | `http://127.0.0.1:11434/api` | Local Ollama normally accepts unauthenticated requests. |
 | Ollama Cloud | `https://ollama.com/api` | Ollama API key. |
 | OpenAI-compatible | A service’s Chat Completions base URL | Optional bearer key and headers populated from environment variables. |
 
-I can point an API adapter at a compatible gateway by editing its base URL. For example, LM Studio and many self-hosted inference servers expose Chat Completions. An endpoint with its own wire format needs a compatible gateway or a new adapter. Model discovery is optional, so I can still enter IDs when an endpoint provides inference only.
+I can point an API adapter at a compatible gateway by editing its base URL. For example, LM Studio and many self-hosted inference servers expose Chat Completions. An endpoint with its own wire format needs a compatible gateway or a new adapter. Model discovery is optional, so I can still enter IDs when an endpoint provides inference only. Under **Advanced connection settings**, I can set the header that receives my saved API key. This lets me connect to gateways that expect a header such as `api-key`.
+
+For Gemini, I can discover models that support content generation, add model IDs manually, and use them in either mode. Text replies, image and PDF inputs, and Code Agent tool calls use Gemini’s own API. OpenDex keeps signed tool-call parts in memory while a turn is running. [Gemini API reference](https://aistudio.google.com/api-reference/generate-content)
 
 For a ChatGPT account, I install the [Codex CLI](https://learn.chatgpt.com/docs/cli), add the **ChatGPT Account** adapter, and click **Connect account**. The Codex executable opens the official browser flow and manages its own credentials. OpenDex uses a dedicated Codex home so the connection is independent of my terminal setup. The browser flow and subscribed inference are still part of my live verification checklist. [Codex app-server authentication](https://learn.chatgpt.com/docs/app-server#auth-endpoints)
 
@@ -71,7 +74,7 @@ cargo test --locked
 cargo test --locked --test provider_transports installed_codex_server -- --ignored
 ```
 
-I use loopback fixtures to test each wire format and MCP transport without account credentials. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, approved a file edit and an MCP call in a disposable project, and sent a rendered MCP prompt with a text resource to a local Ollama model.
+I use loopback fixtures to test each wire format and MCP transport without account credentials. I verified Gemini model discovery, streaming chat, and a Code Agent file read through the desktop app against a native-protocol fixture. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, approved a file edit and an MCP call in a disposable project, and sent a rendered MCP prompt with a text resource to a local Ollama model.
 
 ### Source layout
 
