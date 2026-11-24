@@ -70,8 +70,6 @@ export function settingsPanel(api) {
   let accountBusy = false;
   let authUrl;
   let catalogSearch = '';
-  // Preserve the access mode a user chooses while they finish filling in the connection.
-  const anthropicAuthDrafts = new Map();
 
   function open(section = 'providers', id = null) {
     if (section === 'providers' && id) selectedProvider = id;
@@ -93,7 +91,7 @@ export function settingsPanel(api) {
     return {
       id: uuid(), name: adapters[kind][0], kind, endpoint: adapters[kind][1], models: [],
       has_secret: false, headers: [], token_limit: null, ollama_think: null,
-      anthropic_auth: kind === 'anthropic' ? (anthropicAuthDrafts.get('__new__') ?? 'api') : 'api',
+      anthropic_auth: 'api',
     };
   }
 
@@ -141,17 +139,17 @@ export function settingsPanel(api) {
     const status = el('div', { class: 'form-status', role: 'status' });
     const isAccount = provider.kind === 'chat_gpt_account';
     const anthropic = provider.kind === 'anthropic';
-    const anthropicAuthKey = adding ? '__new__' : provider.id;
-    let anthropicAuth = anthropic
-      ? (anthropicAuthDrafts.get(anthropicAuthKey) ?? provider.anthropic_auth ?? 'api')
-      : undefined;
+    let anthropicAuth = provider.anthropic_auth ?? 'api';
     form.append(
       field('Adapter', options(Object.entries(adapters).map(([key, [name]]) => [key, name]), provider.kind,
         (value) => { newProviderKind = value; render(); }, { disabled: !adding })),
       field('Display name', name),
     );
-    if (!isAccount && (!anthropic || anthropicAuth === 'api')) {
-      form.append(
+    const connectionFields = el('div', { class: 'form-grid wide' });
+    function showConnectionFields() {
+      connectionFields.replaceChildren();
+      if (isAccount || (anthropic && anthropicAuth === 'account')) return;
+      connectionFields.append(
         field('Base URL', endpoint, 'Include the API prefix, such as /v1 or /api.'),
         field('API key', secret, provider.has_secret ? 'Leave blank to keep the key for this endpoint.' : 'Optional for endpoints that accept unauthenticated requests.'),
         el('details', { class: 'wide inset' }, el('summary', {}, 'Advanced connection settings'),
@@ -160,26 +158,27 @@ export function settingsPanel(api) {
             field('Headers from environment', headers, 'One header per line. Use HEADER_NAME=ENVIRONMENT_VARIABLE.'),
             ollama && field('Model thinking', options([['default', 'Model default'], ['true', 'On'], ['false', 'Off']], think, (value) => { think = value; })))),
       );
-      if (provider.has_secret) form.append(check('Forget saved key', false, (value) => { forget = value; }));
+      if (provider.has_secret) connectionFields.append(check('Forget saved key', forget, (value) => { forget = value; }));
     }
+    showConnectionFields();
+    form.append(connectionFields);
     if (anthropic) {
       form.append(field('Anthropic access', options([['api', 'Console API key'], ['account', 'Claude account']], anthropicAuth,
         (value) => {
           anthropicAuth = value;
-          anthropicAuthDrafts.set(anthropicAuthKey, value);
-          render();
+          showConnectionFields();
+          showAccountPanel();
         })));
     }
     const saveButton = el('button', { type: 'submit', class: 'button primary' }, icon('check', 16), adding ? 'Add provider' : 'Save connection');
     const actions = el('div', { class: 'form-actions wide' }, saveButton, status);
     if (adding) {
-      actions.append(button('Cancel', () => { newProviderKind = null; anthropicAuthDrafts.delete(anthropicAuthKey); render(); }));
+      actions.append(button('Cancel', () => { newProviderKind = null; render(); }));
     } else {
       actions.append(button('Remove provider', () => api.confirm('Remove provider', 'This removes the connection and saved key from OpenDex.', async () => {
         if (isAccount && (accountStatus?.connected)) throw new Error('Disconnect the account before removing this provider.');
         await api.invoke('remove_provider', { id: provider.id });
         selectedProvider = null;
-        anthropicAuthDrafts.delete(provider.id);
         await api.refresh();
         render();
       }), { style: 'button danger quiet' }));
@@ -188,24 +187,24 @@ export function settingsPanel(api) {
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       await run(saveButton, status, async () => {
-        const headerPairs = lines(headers.value).map((line) => {
+        const headerPairs = (anthropic && anthropicAuth === 'account' ? [] : lines(headers.value)).map((line) => {
           const at = line.indexOf('=');
           if (at < 1) throw new Error('Use HEADER_NAME=ENVIRONMENT_VARIABLE for each header.');
           return [line.slice(0, at).trim(), line.slice(at + 1).trim()];
         });
         const valuePatch = {
           name: name.value,
-          endpoint: endpoint.value,
-          api_key_header: keyHeader.value.trim() || null,
-          headers: headerPairs,
+          endpoint: anthropic && anthropicAuth === 'account' ? adapters.anthropic[1] : endpoint.value,
+          api_key_header: anthropic && anthropicAuth === 'account' ? null : keyHeader.value.trim() || null,
+          headers: anthropic && anthropicAuth === 'account' ? [] : headerPairs,
           token_limit: numberOrNull(tokenLimit.value),
           ollama_think: think === 'default' ? null : think === 'true',
           anthropic_auth: anthropic ? anthropicAuth : 'api',
         };
         const value = { ...provider, ...valuePatch };
-        const saved = await api.invoke('save_provider', { value, secret: secret.value || null, forget });
+        const saved = await api.invoke('save_provider', { value, secret: anthropic && anthropicAuth === 'account' ? null : secret.value || null, forget });
         selectedProvider = saved.id; newProviderKind = null; catalogSearch = '';
-        anthropicAuthDrafts.delete(anthropicAuthKey);
+
         await api.refresh();
         render();
         api.toast('Connection saved.');
@@ -213,11 +212,15 @@ export function settingsPanel(api) {
     });
 
     const section = formSection(adding ? 'New connection' : provider.name, '', form);
-    if (anthropic && anthropicAuth === 'account') {
-      section.append(adding ? el('p', { class: 'field-note' }, 'Save the connection to sign in.') : anthropicAccount(provider));
-    } else if (provider.kind === 'anthropic') {
-      section.append(el('p', { class: 'field-note' }, 'Claude API uses a Console key. Claude.ai subscription sign-in needs an Anthropic account.'));
+    const accountPanel = el('div', { class: 'wide' });
+    function showAccountPanel() {
+      accountPanel.replaceChildren();
+      if (anthropic && (anthropicAuth === 'account' || (provider.anthropic_auth === 'account' && provider.has_secret))) {
+        accountPanel.append(adding ? el('p', { class: 'field-note' }, 'Save the connection to sign in.') : anthropicAccount(provider));
+      }
     }
+    showAccountPanel();
+    section.append(accountPanel);
     if (isAccount && !adding) section.append(account());
     return section;
   }
