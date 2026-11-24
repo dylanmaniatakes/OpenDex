@@ -985,3 +985,93 @@ async fn native_gemini_requires_a_completed_tool_stream() {
     assert!(error.to_string().contains("before reporting completion"));
     fixture.finish();
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires installed Codex CLI and native Keychain access for disposable credentials"]
+async fn installed_codex_keyring_format_matches_portable_entry() {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    use zeroize::Zeroizing;
+    struct Cleanup(Vec<keyring::Entry>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for entry in &self.0 {
+                let _ = entry.delete_credential();
+            }
+        }
+    }
+    let folder = tempfile::tempdir().unwrap();
+    let program = std::env::var("OPENDEX_TEST_CODEX").unwrap_or_else(|_| "codex".into());
+    let source = folder.path().join("source");
+    let destination = folder.path().join("destination");
+    let entries = Cleanup(vec![
+        opendex::codex::credential_entry(&source).unwrap(),
+        opendex::codex::credential_entry(&destination).unwrap(),
+    ]);
+    let mut child = tokio::process::Command::new(&program)
+        .env("CODEX_HOME", &source)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY")
+        .args([
+            "-c",
+            "cli_auth_credentials_store=\"keyring\"",
+            "-c",
+            "auth_keyring_backend=\"direct\"",
+            "login",
+            "--with-api-key",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(b"sk-opendex-disposable-format-fixture\n")
+        .await
+        .unwrap();
+    drop(stdin);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(20), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        status.success(),
+        "Codex could not create the disposable keyring entry"
+    );
+    let raw = Zeroizing::new(entries.0[0].get_password().unwrap());
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    assert!(value["OPENAI_API_KEY"].as_str() == Some("sk-opendex-disposable-format-fixture"));
+    entries.0[1].set_password(&raw).unwrap();
+    let mut check = tokio::process::Command::new(&program)
+        .env("CODEX_HOME", &destination)
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CODEX_API_KEY")
+        .args([
+            "-c",
+            "cli_auth_credentials_store=\"keyring\"",
+            "-c",
+            "auth_keyring_backend=\"direct\"",
+            "login",
+            "status",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(20), check.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success(),
+        "Codex did not recognize the destination keyring entry"
+    );
+    for entry in &entries.0 {
+        entry.delete_credential().unwrap();
+        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
+    }
+}
