@@ -10,7 +10,7 @@ I built OpenDex to use the models I choose for everyday chat and coding. It runs
 4. Use **Discover models** to browse an endpoint’s inventory, or paste model IDs one per line and choose **Add models**. Duplicate IDs are removed. Each model I add appears in both modes. For Ollama Cloud I use the Ollama API key and can submit a query to the public model database, then add only the model IDs I want. I can also enter IDs manually.
 5. Use the sidebar dropdown to switch between **Model Chat** and **Code Agent**. Model Chat shows its conversations. In Code Agent, use **Add project** to choose a folder, then use the plus button beside a project to create another thread in it.
 
-I can search saved conversation titles, message text, project names, attachment names, MCP resource labels, selected providers and models, and tool names from the sidebar. In the composer, I can filter provider and model lists by name so I can find the connection I want among several. Search stays on my computer and filters the selected mode. In Code Agent, matching project groups expand while I search. Escape clears the query.
+I can search saved conversation titles, message text, project names, attachment names, MCP resource labels, selected providers and models, and tool names from the sidebar. Search stays on my computer and filters the selected mode. In Code Agent, matching project groups expand while I search. Escape clears the query.
 
 I can rename or export each conversation and set instructions globally or per thread. Export includes provider and model, thread instructions, tool outputs, saved attachment metadata, and MCP context labels while keeping attachment contents private. Both modes stream replies, and the stop button interrupts the active turn.
 

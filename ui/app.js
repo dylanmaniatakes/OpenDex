@@ -3,7 +3,6 @@ import { matchesHistory } from './history-search.js';
 import { icon } from './icons.js';
 import { mcpContextPicker } from './mcp-context.js';
 import { settingsPanel, permissionName } from './settings.js';
-import { filterComposerChoices } from './model-filter.js';
 
 const tauri = window.__TAURI__;
 const invoke = (command, args = {}) => tauri.core.invoke(command, args);
@@ -407,18 +406,16 @@ async function setSelection(thread, provider, model) {
 }
 
 function modelPicker(thread) {
-  const { providers, provider, models, selectedModel } = filterComposerChoices(data.providers, {
-    selectedProviderId: thread?.provider_id,
-    selectedModelId: thread?.model_id,
-    query: $('model-filter').value,
-  });
-  $('provider-select').replaceChildren(...(providers.length ? providers.map((item) => el('option', { value: item.id }, item.name)) : [el('option', { value: '' }, 'No matching provider')]));
+  const provider = data.providers.find((item) => item.id === thread?.provider_id) ?? data.providers[0];
+  const models = [...(provider?.models ?? [])];
+  const selectedModel = models.includes(thread?.model_id) ? thread?.model_id : models[0] ?? '';
+  $('provider-select').replaceChildren(...(data.providers.length ? data.providers.map((item) => el('option', { value: item.id }, item.name)) : [el('option', { value: '' }, 'Add a provider')]));
   $('provider-select').value = provider?.id ?? '';
   $('model-select').replaceChildren(
-    ...models.length ? models.map((id) => el('option', { value: id }, id)) : [el('option', { value: '' }, provider?.models.length ? 'No matching model' : 'Add models')],
+    ...models.length ? models.map((id) => el('option', { value: id }, id)) : [el('option', { value: '' }, 'Add models')],
   );
   $('model-select').value = selectedModel;
-  $('provider-select').disabled = Boolean(live()) || !providers.length;
+  $('provider-select').disabled = Boolean(live()) || !data.providers.length;
   $('model-select').disabled = Boolean(live()) || !models.length;
   $('permission-label').replaceChildren(...mode === 'agent' ? [
     button(permissionName(data.permissions.profile), () => settings.open('permissions'), {
@@ -977,16 +974,6 @@ function bind() {
     const provider = data.providers.find((item) => item.id === event.target.value);
     await setSelection(current(), provider?.id, provider?.models[0]);
   }));
-  $('model-filter').addEventListener('input', () => {
-    if (!live()) modelPicker(current());
-  });
-  $('model-filter').addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.target.value = '';
-      modelPicker(current());
-    }
-  });
   $('model-select').addEventListener('change', transient((event) => setSelection(current(), $('provider-select').value, event.target.value)));
   $('prompt').addEventListener('input', (event) => {
     const draft = draftOf();

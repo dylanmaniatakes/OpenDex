@@ -213,7 +213,6 @@ th { background: var(--panel); }
 .composer-controls { justify-content: space-between; }
 #web-search[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); }
 .model-controls { flex: 1; }
-#model-filter { min-width: 0; max-width: 190px; background-color: var(--panel-raised); border: 1px solid var(--line); min-height: 32px; padding: 3px 8px; color: var(--muted); font-size: .75rem; border-radius: min(var(--radius), 7px); }
 .send-controls { flex-shrink: 0; }
 .control-divider { background: var(--line); width: 1px; height: 19px; }
 .select-control { min-width: 0; max-width: 155px; }
