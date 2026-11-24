@@ -106,7 +106,7 @@ bash scripts/bundle-macos.sh
 The bundling script writes `dist/OpenDex.app` and applies a local ad-hoc signature. Finder can launch the preview on the Mac that built it. Developer ID signing and notarization are release tasks. The Rust and Tauri code leave room for Windows and Linux builds. I have tested the desktop on Apple Silicon macOS and scoped command isolation is implemented for macOS.
 
 ```sh
-node --test tests/history_search.mjs
+node --test tests/*.mjs
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
@@ -114,6 +114,8 @@ cargo test --locked --test provider_transports installed_codex_server -- --ignor
 ```
 
 I use loopback fixtures to test each wire format and MCP transport without account credentials. I verified Gemini model discovery, streaming chat, and a Code Agent file read through the desktop app against a native-protocol fixture. The optional Codex check exercises the installed CLI with an isolated data directory. I tested live local Ollama replies in Model Chat, including edited and retried branches, a live Code Agent file read, and the public Ollama Cloud catalog from the macOS GUI. I also switched between modes, created a thread under one of two test projects, approved a file edit and an MCP call in a disposable project, and sent a rendered MCP prompt with a text resource to a local Ollama model.
+
+I verified that the macOS release starts with the sidebar search module packaged, that a nonmatching search hides the saved conversation, and that Escape restores it. The frontend asset test checks that every local JavaScript import is listed in the desktop bundle configuration.
 
 I verified conversation-level MCP selection with two loopback servers in the macOS app. I declined and approved individual tool calls under a globally permissive profile, checked that a denied tool stayed out of the model request, and ran a Code Agent conversation with an empty selection.
 

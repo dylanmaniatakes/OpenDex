@@ -8,6 +8,7 @@
       "ui/index.html",
       "ui/style.css",
       "ui/app.js",
+      "ui/history-search.js",
       "ui/dom.js",
       "ui/icons.js",
       "ui/settings.js",
