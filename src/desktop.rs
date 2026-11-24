@@ -1862,11 +1862,44 @@ fn acquire_instance(identifier: &str) -> Result<Option<fs::File>> {
     }
 }
 
+/// A second launch hands control back to the copy that already holds the
+/// application lock. On macOS, `open` focuses the running bundle without
+/// starting another process; other platforms keep the silent single-instance
+/// exit and note it on the terminal.
+fn bring_running_instance_to_front() {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = std::env::current_exe()
+        .ok()
+        .and_then(|path| app_bundle(&path))
+    {
+        let _ = std::process::Command::new("open")
+            .arg(bundle)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    eprintln!("OpenDex is already running.");
+}
+
+/// The `.app` bundle that contains this executable, or nothing for a plain
+/// development binary whose ancestors are not a bundle's `Contents` folder.
+fn app_bundle(executable: &std::path::Path) -> Option<PathBuf> {
+    let contents = executable.parent()?.parent()?;
+    if contents.file_name().is_none_or(|name| name != "Contents") {
+        return None;
+    }
+    contents.parent().map(|bundle| bundle.to_path_buf())
+}
+
 pub fn run() {
     let context = tauri::generate_context!();
     let _instance = match acquire_instance(&context.config().identifier) {
         Ok(Some(lock)) => lock,
-        Ok(None) => return,
+        Ok(None) => {
+            bring_running_instance_to_front();
+            return;
+        }
         Err(error) => {
             eprintln!("OpenDex could not start: {error:#}");
             return;
@@ -1949,6 +1982,24 @@ pub fn run() {
 mod tests {
     use super::*;
     use crate::state::Attachment;
+
+    #[test]
+    fn app_bundle_resolves_only_bundled_executables() {
+        let base = tempfile::tempdir().unwrap();
+        let bundled = base
+            .path()
+            .join("OpenDex.app")
+            .join("Contents")
+            .join("MacOS");
+        fs::create_dir_all(&bundled).unwrap();
+        assert_eq!(
+            app_bundle(&bundled.join("opendex")),
+            Some(base.path().join("OpenDex.app"))
+        );
+        let plain = base.path().join("target").join("debug");
+        fs::create_dir_all(&plain).unwrap();
+        assert_eq!(app_bundle(&plain.join("opendex")), None);
+    }
 
     #[test]
     fn conversation_export_includes_provider_and_saved_context() {
