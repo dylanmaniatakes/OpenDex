@@ -7,6 +7,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{BufWriter, Write},
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -134,7 +135,6 @@ impl Provider {
         ensure!(
             local.id != self.id
                 && local.local_execution.is_none()
-                && !local.hermes_remote_approvals
                 && local.models.contains(&selection.model)
                 && (local.kind != ProviderKind::OpenAiCompatible
                     || (local.endpoint != self.endpoint
@@ -905,11 +905,41 @@ impl Thread {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceBridgeSettings {
+    pub listen: SocketAddr,
+    pub client_url: Option<String>,
+}
+
+impl WorkspaceBridgeSettings {
+    pub fn validate(&self) -> Result<()> {
+        let ip = self.listen.ip();
+        ensure!(
+            self.listen.port() != 0 && !ip.is_unspecified() && !ip.is_multicast(),
+            "Choose a specific local IP address and port for the workspace toolset."
+        );
+        self.url()?;
+        Ok(())
+    }
+
+    pub fn url(&self) -> Result<reqwest::Url> {
+        let Some(raw) = &self.client_url else {
+            return endpoint(&format!("http://{}/mcp", self.listen));
+        };
+        let mut url = endpoint(raw.trim())?;
+        let path = url.path().trim_end_matches('/').to_owned();
+        url.set_path(&path);
+        Ok(url)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Data {
     pub providers: Vec<Provider>,
     pub servers: Vec<Server>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_bridge: Option<WorkspaceBridgeSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<web::Config>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -936,6 +966,7 @@ impl Default for Data {
         Self {
             providers: vec![Provider::local()],
             servers: vec![],
+            workspace_bridge: None,
             web_search: None,
             image_generation: None,
             image_sources: vec![],

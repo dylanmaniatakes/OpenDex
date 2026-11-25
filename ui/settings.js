@@ -127,6 +127,39 @@ export function settingsPanel(api) {
     return page;
   }
 
+  function workspaceBridge() {
+    const saved = api.data().workspace_bridge;
+    const listen = input(saved?.listen ?? '127.0.0.1:47833', { required: true, spellcheck: 'false' });
+    const clientUrl = input(saved?.client_url ?? '', { type: 'url', spellcheck: 'false' });
+    const status = el('div', { class: 'form-status', role: 'status' });
+    const save = el('button', { type: 'submit', class: 'button primary' }, saved ? 'Save workspace toolset' : 'Enable workspace toolset');
+    const disable = button('Disable workspace toolset', async () => {
+      await run(disable, status, async () => {
+        await api.invoke('configure_workspace_bridge', { settings: null });
+        await api.refresh();
+        render();
+      });
+    });
+    const form = el('form', { class: 'form-grid', onsubmit: async (event) => {
+      event.preventDefault();
+      await run(save, status, async () => {
+        await api.invoke('configure_workspace_bridge', {
+          settings: { listen: listen.value.trim(), client_url: clientUrl.value.trim() || null },
+        });
+        await api.refresh();
+        render();
+        api.toast('Workspace toolset is listening.');
+      });
+    } },
+    field('Listen address', listen, 'Bind to a specific local IP and port. Use loopback with an HTTPS proxy or the local address on your private network.'),
+    field('Client-facing MCP URL', clientUrl, 'Optional. Use the URL clients can reach when a proxy or tunnel sits in front of OpenDex.'),
+    el('div', { class: 'form-actions wide' }, save,
+      saved && button('Copy server URL', () => api.copy(saved.client_url || `http://${saved.listen}/mcp`)),
+      saved && disable, status));
+    return formSection('OpenDex workspace toolset',
+      'Expose the selected project to Hermes or another Streamable HTTP MCP client. OpenDex grants access per turn or through a temporary workspace link.', form);
+  }
+
   function providerForm(provider, adding) {
     const form = el('form', { class: 'form-grid' });
     const name = input(provider.name, { required: true, maxlength: 80 });
@@ -146,7 +179,7 @@ export function settingsPanel(api) {
     let localExecution = provider.local_execution ?? null;
     const executionValue = (selection) => selection ? JSON.stringify([selection.provider, selection.model]) : '';
     const localModels = api.data().providers.filter((candidate) => candidate.id !== provider.id
-      && !candidate.hermes_remote_approvals && !candidate.local_execution
+      && !candidate.local_execution
       && (candidate.kind !== 'open_ai_compatible' || candidate.endpoint !== provider.endpoint))
       .flatMap((candidate) => candidate.models.filter((model) => candidate.kind !== 'open_ai_compatible'
         || !/^(hermes-agent$|openclaw(?:$|[/:])|agent:)/i.test(model))
@@ -183,7 +216,8 @@ export function settingsPanel(api) {
             localExecution = value ? { provider, model } : null;
           }), 'For a server agent such as Hermes, pair a saved inference model so OpenDex can run workspace tools on this computer.'),
           check('Allow Hermes VPS tasks and relay command approvals', hermesApprovals, (value) => { hermesApprovals = value; }),
-          el('p', { class: 'field-note' }, 'With a paired model, OpenDex asks before sending a task to the VPS. Direct Hermes Agent mode sends Model Chat turns to Hermes. The VPS decides which commands require approval.')),
+          el('p', { class: 'field-note' }, 'With a paired model, OpenDex asks before sending a task to the VPS. Direct Agent turns from Code Agent require approval before sending. Hermes decides which VPS commands require approval.'),
+          !adding && button('OpenDex workspace toolset', () => open('mcp'), { style: 'text-link' })),
         el('details', { class: 'wide inset' }, el('summary', {}, 'Advanced connection settings'),
           el('div', { class: 'form-grid compact' }, field('Output token limit', tokenLimit),
             field('API key header', keyHeader, 'Leave blank for the adapter default. A custom header receives the saved key as entered.'),
@@ -426,6 +460,7 @@ export function settingsPanel(api) {
       page.append(el('div', { class: 'empty-settings' }, icon('plug', 26), el('h3', {}, 'No MCP servers'),
         el('p', { class: 'muted' }, 'Add a local command or Streamable HTTP endpoint.')));
     }
+    page.append(workspaceBridge());
     return page;
   }
 

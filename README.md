@@ -86,7 +86,39 @@ A server-agent endpoint such as the Hermes Agent API can run tools on its own ho
 3. In the Hermes provider's settings, choose that inference model under **Local execution model**. Select the Hermes connection in the composer to use the pair. The paired model handles the conversation and OpenDex runs workspace tools locally.
 4. To allow delegation, enable **Allow Hermes VPS tasks and relay command approvals**. OpenDex shows the exact task before sending it. It relays reviewable command requests from Hermes as **Allow once** or **Deny** prompts. The remote server's policy determines which commands require its approval.
 
-Delegation needs a server that advertises the [Hermes Runs API](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server) and approval events. Direct Hermes Agent mode is available for explicitly remote Model Chat. OpenClaw agent targets can be paired for local work. The pairing follows the published [OpenClaw documentation](https://docs.openclaw.ai/gateway/openai-http-api) and still needs live testing. Native approvals use the separate [OpenClaw Gateway protocol](https://docs.openclaw.ai/gateway/protocol).
+For direct Hermes Agent access, enable VPS approvals and leave **Local execution model** unset. Model Chat sends turns to Hermes. In Code Agent, select a project and approve the turn to share its tools with Hermes. OpenDex can relay local tool requests and results through the existing Hermes connection. Hermes's built-in tools run on the VPS. Direct access requires Hermes approval events. Delegation from a paired local model also needs the [Hermes Runs API](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server).
+
+### Expose the OpenDex workspace toolset
+
+Open **Settings → MCP Servers → OpenDex workspace toolset** and enable it. It serves workspace tools over [Streamable HTTP MCP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports). The default address is `http://127.0.0.1:47833/mcp`. For remote clients, bind to a specific local address on your private network, or keep loopback and use an HTTPS proxy. Set **Client-facing MCP URL** if clients reach OpenDex at a different address. Use an encrypted connection and keep workspace links private.
+
+#### Native MCP calls from Hermes
+
+Register OpenDex in Hermes if you want the agent to invoke the workspace tools directly through MCP.
+
+1. In **Settings → Providers**, select the Hermes Agent connection. Set **Local execution model** to **Use this connection directly**, enable **Allow Hermes VPS tasks and relay command approvals**, and save.
+2. Add OpenDex's stable MCP URL to the Hermes profile behind the API endpoint. Add an entry to the existing [`mcp_servers` configuration](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp).
+
+   ```yaml
+   mcp_servers:
+     opendex:
+       url: "https://your-private-opendex-endpoint/mcp"
+       timeout: 360
+       tools:
+         resources: false
+         prompts: false
+   ```
+
+3. Run `hermes mcp test opendex` in that profile to verify discovery. If the profile has a restricted `platform_toolsets.api_server` list, include `mcp-opendex` alongside the tools already enabled. Refresh the MCP connections in Hermes after saving.
+4. Open the project in **Code Agent**, select Hermes, and approve the turn. OpenDex issues a workspace grant for that turn. Hermes uses the OpenDex tools on your computer and its built-in tools for work on the VPS. Hermes continues to use its configured inference provider.
+
+#### Other MCP clients
+
+In a Code Agent conversation with a project, open **Conversation settings → Share workspace with MCP client**. Approve sharing, copy the temporary link, and add it as a Streamable HTTP MCP server in your client. The link grants access to that project for up to 30 minutes. **Stop sharing** revokes it immediately.
+
+Both routes return local tool results to the requesting client. OpenDex enforces the selected workspace and read permissions, and asks before local edits and commands. VPS command prompts follow the Hermes server's policy.
+
+OpenClaw agent targets can be paired for local work. The pairing follows the published [OpenClaw documentation](https://docs.openclaw.ai/gateway/openai-http-api) and still needs live testing. Native approvals use the separate [OpenClaw Gateway protocol](https://docs.openclaw.ai/gateway/protocol).
 
 ## MCP and web search
 

@@ -165,6 +165,24 @@ function confirm(title, text, action, label = 'Remove') {
       button('Cancel', () => $('details').close()), actionButton)));
 }
 
+function shareWorkspace(thread) {
+  if (!data.workspace_bridge) {
+    $('details').close();
+    settings.open('mcp');
+    return;
+  }
+  confirm('Share this workspace', 'Anyone with the temporary link can request tools in this project. OpenDex enforces your read settings and asks before edits and commands. The link expires after 30 minutes or when you stop sharing.', async () => {
+    const url = await invoke('share_workspace', { id: thread.id });
+    turns.set(thread.id, { stream: '', approval: null, accepted: true, workspaceLink: url });
+    render();
+    showDetails('Workspace shared', el('div', { class: 'details-form' },
+      field('MCP link', el('input', { type: 'text', value: url, readonly: true })),
+      el('div', { class: 'form-actions right' },
+        button('Copy MCP link', () => copy(url), { style: 'button primary' }),
+        button('Done', () => $('details').close()))));
+  }, 'Start sharing');
+}
+
 function transient(operation) {
   return async (...args) => {
     try { await operation(...args); }
@@ -431,6 +449,7 @@ function threadMenu(thread) {
         $('details').close();
         queueNavigation(() => openThread(thread.parent_thread));
       }, { glyph: 'branch' }),
+    thread.mode === 'agent' && thread.workspace && button('Share workspace with MCP client', () => shareWorkspace(thread), { glyph: 'plug', disabled: busy }),
     thread.workspace && button('Clear project', transient(async () => {
       updateThread(await invoke('edit_thread', { id, changes: { clear_workspace: true } }));
       $('details').close();
@@ -486,9 +505,12 @@ function modelPicker(thread) {
   ] : []);
   const empty = !provider || !provider.models.length;
   const execution = provider?.local_execution;
+  const hermes = provider?.kind === 'open_ai_compatible' && /^hermes-agent$/i.test(selectedModel);
+  const location = execution ? 'Local tools' : hermes && mode === 'agent'
+    ? (thread?.workspace ? 'Mac and VPS tools' : 'Hermes VPS tools') : '';
   $('composer-footer').replaceChildren(
     ...empty ? [button(provider ? 'Manage models' : 'Add a provider', () => settings.open('providers', provider?.id), { style: 'text-link' })]
-      : [...(execution ? [el('span', { title: execution.model }, 'Local tools'), el('span', { class: 'footer-dot' })] : []),
+      : [...(location ? [el('span', { title: execution?.model ?? '' }, location), el('span', { class: 'footer-dot' })] : []),
         el('span', {}, 'Enter to send'), el('span', { class: 'footer-dot' }),
         el('span', {}, 'Shift + Enter for a new line')]);
 }
@@ -774,7 +796,16 @@ function status() {
   node.replaceChildren();
   const recording = dictation.current();
   if (turn?.approval) node.append(renderApproval(turn.approval));
-  else if (turn) node.append(el('div', { class: 'live-status' }, el('span', { class: 'pulse' }),
+  if (turn?.workspaceLink) {
+    const id = active;
+    node.append(el('div', { class: 'live-status' }, el('span', { class: 'pulse' }),
+      'Workspace shared',
+      button('Copy MCP link', () => copy(turn.workspaceLink), { style: 'button quiet' }),
+      button('Stop sharing', transient(() => invoke('stop_turn', { id })), { style: 'button quiet' })));
+    return;
+  }
+  if (turn?.approval) return;
+  if (turn) node.append(el('div', { class: 'live-status' }, el('span', { class: 'pulse' }),
     turn.notice || (turn.stream ? 'Generating' : 'Waiting for the model')));
   else if (recording && recording.thread === active) node.append(el('div', { class: 'live-status' },
     recording.stage === 'recording' && el('span', { class: 'pulse' }),
@@ -784,6 +815,7 @@ function status() {
     const error = drafts.get(active).error;
     node.append(el('p', { class: 'status-error' }, error));
     if (error.startsWith('This is the Hermes Agent API.') || error.startsWith('Could not verify Hermes command approval support.')
+      || error.startsWith('Could not confirm whether this connection runs tools on the server.')
       || error.startsWith('This endpoint does not advertise Hermes command approvals.') || error.startsWith('Local execution model unavailable.')
       || error.includes('Choose a local execution model for this connection')) {
       node.append(button('Provider settings', () => settings.open('providers', current()?.provider_id),
@@ -1038,6 +1070,10 @@ function onTurn({ thread: id, kind, details }) {
       if (!thread.messages.some((message) => message.id === details.message.id)) thread.messages.push(details.message);
       if (id === active) timeline(thread);
       break;
+    case 'reset_stream':
+      turn.stream = '';
+      if (id === active) timeline(thread);
+      break;
     case 'code_handoff': {
       const { thread: updated, project } = details;
       turn.stream = '';
@@ -1054,6 +1090,12 @@ function onTurn({ thread: id, kind, details }) {
     }
     case 'stopped':
       draftOf(id).notice = 'Turn stopped.';
+      break;
+    case 'workspace_share_ended':
+      if (!turn.workspaceLink) break;
+      turns.delete(id);
+      unreadApprovals.delete(id);
+      render();
       break;
     case 'notice':
       turn.notice = details.message;

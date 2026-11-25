@@ -7,11 +7,11 @@ use crate::{
     providers::{self, Tool},
     state::{
         AnthropicAuth, Appearance, BranchAction, Data, MAX_RESOURCE_BYTES,
-        MAX_RESOURCES_PER_MESSAGE, McpResource, McpScope, Message, Mode, Permissions, Project,
-        Provider, ProviderKind, Role, Rule, Server, Store, Thread, ToolCall, Transport,
-        delete_secret, one_or_many, write_secret,
+        MAX_RESOURCES_PER_MESSAGE, McpResource, McpScope, Message, Mode, Permissions, Profile,
+        Project, Provider, ProviderKind, Role, Rule, Server, Store, Thread, ToolCall, Transport,
+        WorkspaceBridgeSettings, delete_secret, one_or_many, write_secret,
     },
-    transcription, voice, web,
+    transcription, voice, web, workspace_bridge, workspace_relay,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,10 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::{
+    sync::{Mutex as AsyncMutex, mpsc, oneshot, watch},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -38,6 +41,7 @@ struct Desktop {
     runs: Mutex<HashMap<Uuid, CancellationToken>>,
     workspaces: Mutex<HashSet<PathBuf>>,
     approvals: Mutex<HashMap<Uuid, oneshot::Sender<bool>>>,
+    workspace_bridge: AsyncMutex<Option<workspace_bridge::Bridge>>,
     codex_lock: AsyncMutex<()>,
     claude_lock: AsyncMutex<()>,
     backup_lock: AsyncMutex<()>,
@@ -81,6 +85,27 @@ impl Desktop {
         );
         Ok(())
     }
+
+    async fn workspace_bridge(
+        &self,
+        expected: &WorkspaceBridgeSettings,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<workspace_bridge::Bridge>>> {
+        let mut bridge = self.workspace_bridge.lock().await;
+        ensure!(
+            self.store
+                .inspect(|data| data.workspace_bridge.as_ref() == Some(expected)),
+            "The workspace toolset settings changed. Try again."
+        );
+        if bridge.is_none() {
+            expected.validate()?;
+            *bridge = Some(
+                workspace_bridge::Bridge::start(expected.listen)
+                    .await
+                    .context("Could not listen on the workspace toolset address.")?,
+            );
+        }
+        Ok(bridge)
+    }
 }
 
 #[tauri::command]
@@ -90,6 +115,45 @@ fn snapshot(app: AppState<'_>) -> Data {
         thread.messages.iter_mut().for_each(attachment_previews);
     }
     data
+}
+
+#[tauri::command]
+async fn configure_workspace_bridge(
+    app: AppState<'_>,
+    settings: Option<WorkspaceBridgeSettings>,
+) -> Reply<Option<String>> {
+    reply(
+        async {
+            let mut bridge = app.workspace_bridge.lock().await;
+            let (url, replacement) = if let Some(settings) = &settings {
+                settings.validate()?;
+                let listener = if bridge
+                    .as_ref()
+                    .is_none_or(|server| server.listen != settings.listen)
+                {
+                    Some(
+                        workspace_bridge::Bridge::start(settings.listen)
+                            .await
+                            .context("Could not listen on the workspace toolset address.")?,
+                    )
+                } else {
+                    None
+                };
+                (Some(settings.url()?.to_string()), listener)
+            } else {
+                (None, None)
+            };
+            app.store.change(|data| {
+                data.workspace_bridge = settings;
+                Ok(())
+            })?;
+            if url.is_none() || replacement.is_some() {
+                *bridge = replacement;
+            }
+            Ok(url)
+        }
+        .await,
+    )
 }
 
 fn thread_for_ui(mut thread: Thread) -> Thread {
@@ -1703,6 +1767,79 @@ impl Turn {
         self.event("notice", json!({"message": "The VPS requested approval without a reviewable command. OpenDex denied it."}));
         false
     }
+
+    async fn call_workspace(&self, call: &ToolCall, source: &str) -> Result<String> {
+        let cap = agent::capability(&call.name).context("Unknown tool.")?;
+        let rule = cap.rule(&self.rules);
+        ensure!(
+            self.approve(&call.name, &call.arguments, source, rule)
+                .await,
+            "Workspace tool declined."
+        );
+        let root = self.root.as_deref().context("Choose a project folder.")?;
+        let mut policy = self.rules.clone();
+        // An automatic command must respect file permissions that require a prompt.
+        if matches!(cap, Capability::Command) && rule == Rule::Allow {
+            if policy.write == Rule::Ask {
+                policy.write = Rule::Deny;
+            }
+            if policy.read == Rule::Ask {
+                policy.read = Rule::Deny;
+            }
+        }
+        agent::execute(root, &policy, &call.name, &call.arguments).await
+    }
+
+    async fn bridged_call(
+        &self,
+        invocation: workspace_bridge::Invocation,
+        used: &mut u8,
+        source: &str,
+    ) {
+        let workspace_bridge::Invocation { call, mut reply } = invocation;
+        if reply.is_closed() {
+            return;
+        }
+        tokio::select! {
+            biased;
+            _ = reply.closed() => {},
+            result = self.shared_workspace_call(&call, used, source) => { let _ = reply.send(result); }
+        }
+    }
+
+    async fn shared_workspace_call(
+        &self,
+        call: &ToolCall,
+        used: &mut u8,
+        source: &str,
+    ) -> (bool, String) {
+        if *used >= self.rules.max_steps {
+            return (
+                false,
+                "The OpenDex workspace tool limit was reached for this turn.".into(),
+            );
+        }
+        *used += 1;
+        let mut local = self.clone();
+        local.rules.profile = Profile::Custom;
+        local.rules.write = local.rules.write.min(Rule::Ask);
+        local.rules.command = local.rules.command.min(Rule::Ask);
+        let (ok, output) = match local.call_workspace(call, source).await {
+            Ok(output) => (true, output),
+            Err(error) => (false, format!("Tool error: {error:#}")),
+        };
+        let label = format!("Local workspace · {}", call.name);
+        let mut message = Message::new(Role::Tool, &output);
+        message.tool_label = Some(label.clone());
+        message.tool_name = Some(call.name.clone());
+        message.tool_id = Some(call.id.clone());
+        let _ = self.append(message);
+        self.event(
+            "tool",
+            json!({"name":label,"tool_name":call.name,"output":output,"success":ok}),
+        );
+        (ok, output)
+    }
 }
 
 impl ToolSession {
@@ -2027,31 +2164,7 @@ impl ToolSession {
             );
             return server.call(name, call.arguments.clone()).await;
         }
-        let cap = agent::capability(&call.name).context("Unknown tool.")?;
-        let rule = cap.rule(&self.turn.rules);
-        ensure!(
-            self.turn
-                .approve(&call.name, &call.arguments, "Local workspace", rule)
-                .await,
-            "Workspace tool declined."
-        );
-        let root = self
-            .turn
-            .root
-            .as_deref()
-            .context("Choose a project folder.")?;
-        let mut policy = self.turn.rules.clone();
-        // Automatic shell execution must not inherit permissions that would
-        // have triggered their own prompt when using a workspace file tool.
-        if matches!(cap, Capability::Command) && rule == Rule::Allow {
-            if policy.write == Rule::Ask {
-                policy.write = Rule::Deny;
-            }
-            if policy.read == Rule::Ask {
-                policy.read = Rule::Deny;
-            }
-        }
-        agent::execute(root, &policy, &call.name, &call.arguments).await
+        self.turn.call_workspace(call, "Local workspace").await
     }
 
     async fn delegate_remote_task(&self, request: RemoteTask) -> Result<String> {
@@ -2575,66 +2688,206 @@ async fn complete_api_turn(
     bail!("The agent reached its tool budget.")
 }
 
+const HERMES_IDLE_LIMIT: Duration = Duration::from_secs(180);
+const HERMES_TOOL_LIMIT: Duration = Duration::from_secs(900);
+
+async fn wait_for_hermes_stall(mut progress: watch::Receiver<Option<Instant>>) {
+    loop {
+        let deadline = *progress.borrow_and_update();
+        if let Some(deadline) = deadline {
+            tokio::select! {
+                biased;
+                change = progress.changed() => if change.is_err() { return; },
+                _ = tokio::time::sleep_until(deadline) => return,
+            }
+        } else if progress.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+type HermesMcpWorkspace = (
+    workspace_bridge::Lease,
+    mpsc::Receiver<workspace_bridge::Invocation>,
+);
+
+struct HermesWorkspace {
+    bridge: Option<HermesMcpWorkspace>,
+    used: u8,
+    relay: bool,
+}
+
 async fn complete_hermes_turn(
     turn: &Turn,
     data: &Data,
     thread: Thread,
     provider: &Provider,
     model: &str,
-    cancel: &CancellationToken,
+    bridge: Option<HermesMcpWorkspace>,
 ) -> Result<()> {
-    let system = format!(
-        "You are a Hermes Agent on a remote host, connected to OpenDex. OpenDex displays approval requests sent by Hermes. Work within the server's configured permissions.\n\n{}\n\n{}",
-        data.instructions, thread.instructions
-    );
-    let messages = portable_history(thread.messages);
+    let tools = agent::tools(thread.mode, turn.root.as_deref(), &turn.rules);
+    let mut workspace = HermesWorkspace {
+        bridge,
+        used: 0,
+        relay: !tools.is_empty(),
+    };
+    let mut messages = portable_history(thread.messages);
+    loop {
+        let grant = workspace.relay.then(Uuid::new_v4);
+        let execution = match grant {
+            Some(grant) => workspace_relay::instructions(grant, &tools),
+            None => {
+                "Hermes tools operate on the VPS. This turn has no OpenDex project tools.".into()
+            }
+        };
+        let mcp = workspace.bridge.as_ref().map_or_else(String::new, |(lease, _)| {
+            format!(" You can instead use the OpenDex MCP tools if they are listed in this run. Set workspace_session to {} on every MCP call. If an MCP call is unavailable, use the workspace reply envelope.", lease.ticket)
+        });
+        let system = format!(
+            "You are a Hermes Agent connected to OpenDex. {execution}{mcp} OpenDex displays command approval requests sent by Hermes. Work within the server's configured permissions.\n\n{}\n\n{}",
+            data.instructions, thread.instructions,
+        );
+        let Some(answer) =
+            run_hermes_step(turn, provider, model, &system, &messages, &mut workspace).await?
+        else {
+            turn.event("stopped", json!({}));
+            return Ok(());
+        };
+        let call = match grant {
+            Some(grant) => workspace_relay::request(&answer.text, grant)?,
+            None => None,
+        };
+        let Some(call) = call else {
+            return turn.checkpoint(assistant_message(answer.text, provider, model));
+        };
+        turn.partial.lock().expect("stream buffer").clear();
+        turn.event("reset_stream", json!({}));
+        ensure!(
+            workspace.used < turn.rules.max_steps,
+            "Hermes reached the OpenDex workspace tool limit."
+        );
+        turn.event(
+            "notice",
+            json!({"message":format!("Hermes requested a local tool · {}",call.name)}),
+        );
+        let executed = turn
+            .cancel
+            .run_until_cancelled(turn.shared_workspace_call(
+                &call,
+                &mut workspace.used,
+                "Local workspace · requested by Hermes",
+            ))
+            .await;
+        let Some((ok, output)) = executed else {
+            turn.event("stopped", json!({}));
+            return Ok(());
+        };
+        turn.event(
+            "notice",
+            json!({"message":"Sending the workspace tool result to Hermes…"}),
+        );
+        messages.push(Message::new(Role::Assistant, &answer.text));
+        messages.push(Message::new(
+            Role::User,
+            workspace_relay::result(&call.name, ok, &output),
+        ));
+    }
+}
+
+async fn run_hermes_step(
+    turn: &Turn,
+    provider: &Provider,
+    model: &str,
+    system: &str,
+    messages: &[Message],
+    workspace: &mut HermesWorkspace,
+) -> Result<Option<providers::Completion>> {
+    let mut display = workspace_relay::Display::default();
+    let relay = workspace.relay;
     let run_id = Mutex::new(None::<String>);
     let (send, mut receive) = mpsc::channel(8);
+    let (progress, updates) = watch::channel(Some(Instant::now() + HERMES_IDLE_LIMIT));
+    let activity = |update: providers::HermesActivity<'_>| {
+        progress.send_if_modified(|deadline| {
+            if let Some(deadline) = deadline {
+                let limit = if update.tool_running {
+                    HERMES_TOOL_LIMIT
+                } else {
+                    HERMES_IDLE_LIMIT
+                };
+                *deadline = Instant::now() + limit;
+                true
+            } else {
+                false
+            }
+        });
+        if let Some(status) = update.notice {
+            turn.event("notice", json!({"message":status}));
+        }
+    };
     let client = &turn.app.client;
     let result = {
-        let approvals = async {
-            while let Some(control) = receive.recv().await {
-                match control {
-                    providers::HermesControl::Started(id) => {
-                        *run_id.lock().expect("Hermes run lock") = Some(id);
-                    }
-                    providers::HermesControl::Approval(approval) => {
-                        let allow = turn
-                            .review_remote_approval(provider, approval.clone())
-                            .await;
-                        providers::resolve_hermes_approval(client, provider, &approval, allow)
-                            .await?;
+        let approvals_and_tools = async {
+            loop {
+                tokio::select! {
+                    control = receive.recv() => match control {
+                        Some(providers::HermesControl::Started(id)) => {
+                            *run_id.lock().expect("Hermes run lock") = Some(id);
+                        }
+                        Some(providers::HermesControl::Approval(approval)) => {
+                            progress.send_replace(None);
+                            let allow = turn.review_remote_approval(provider, approval.clone()).await;
+                            providers::resolve_hermes_approval(client, provider, &approval, allow).await?;
+                            progress.send_replace(Some(Instant::now() + HERMES_TOOL_LIMIT));
+                            turn.event("notice", json!({"message":"Hermes received the approval decision."}));
+                        }
+                        None => bail!("The Hermes approval stream ended before the turn completed."),
+                    },
+                    call = async { workspace.bridge.as_mut().expect("registered workspace").1.recv().await }, if workspace.bridge.is_some() => {
+                        if let Some(call) = call {
+                            let lease = &workspace.bridge.as_ref().expect("registered workspace").0;
+                            progress.send_replace(None);
+                            lease.stop.run_until_cancelled(turn.bridged_call(call, &mut workspace.used, "Local workspace · requested by Hermes")).await;
+                            progress.send_replace(Some(Instant::now() + HERMES_IDLE_LIMIT));
+                        } else {
+                            workspace.bridge = None;
+                        }
                     }
                 }
             }
-            bail!("The Hermes approval stream ended before the turn completed.")
         };
         tokio::select! {
             biased;
-            _ = cancel.cancelled() => Ok(None),
+            _ = turn.cancel.cancelled() => Ok(None),
             result = providers::hermes_remote_completion(
-                client, provider, model, &system, &messages, send, |piece| turn.delta(piece)
+                client, provider, model, system, messages, providers::HermesEvents { controls: send, activity: &activity }, |piece| {
+                    if relay {
+                        display.delta(piece, |visible| turn.delta(visible));
+                    } else {
+                        turn.delta(piece);
+                    }
+                }
             ) => result.map(Some),
-            result = approvals => result,
+            result = approvals_and_tools => result,
+            _ = wait_for_hermes_stall(updates) => {
+                Err(anyhow::anyhow!("Hermes stopped reporting progress. OpenDex reached its wait limit."))
+            },
         }
     };
     if !matches!(&result, Ok(Some(_))) {
         let id = run_id.into_inner().expect("Hermes run lock");
         if let Some(id) = id {
-            let stopped = providers::stop_hermes_run(client, provider, &id).await;
-            if result.is_ok() {
-                stopped.context("Could not confirm that the Hermes VPS run stopped.")?;
+            if let Err(error) = providers::stop_hermes_run(client, provider, &id).await {
+                if let Err(cause) = result {
+                    bail!("{cause:#} Could not confirm that the Hermes VPS run stopped: {error:#}");
+                }
+                return Err(error).context("Could not confirm that the Hermes VPS run stopped.");
             }
         } else if result.is_ok() {
             bail!("Disconnected before Hermes reported a run ID. Check the Hermes run on the VPS.");
         }
     }
-    if let Some(answer) = result? {
-        turn.checkpoint(assistant_message(answer.text, provider, model))?;
-    } else {
-        turn.event("stopped", json!({}));
-    }
-    Ok(())
+    result
 }
 
 #[derive(Deserialize)]
@@ -2998,7 +3251,7 @@ async fn run_user_turn(
     id: Uuid,
     input: TurnInput,
 ) -> Result<()> {
-    let (data, selected, selected_model, root, cancel, mut guard) = {
+    let (data, selected, selected_model, cancel, mut guard) = {
         let mut runs = app.runs.lock().expect("runs lock");
         ensure!(
             !runs.contains_key(&id),
@@ -3012,47 +3265,59 @@ async fn run_user_turn(
             .clone()
             .filter(|model| provider.models.contains(model))
             .context("Choose a model from this provider.")?;
-        let root = thread
-            .workspace
-            .as_deref()
-            .map(agent::checked_root)
-            .transpose()?;
-        if let Some(root) = &root {
-            let mut workspaces = app.workspaces.lock().expect("workspaces lock");
-            ensure!(
-                workspaces.insert(root.clone()),
-                "Another agent is using this project folder."
-            );
-        }
         let cancel = CancellationToken::new();
         runs.insert(id, cancel.clone());
         let guard = RunGuard {
             state: Arc::clone(app),
             thread: id,
-            root: root.clone(),
+            root: None,
         };
-        (data, provider, model, root, cancel, guard)
+        (data, provider, model, cancel, guard)
     };
     let thread = fetch_thread(&data, id)?;
     let (provider, model) = selected.execution_model(&selected_model, &data.providers)?;
     let (provider, model) = (provider.clone(), model.to_owned());
     let rules = data.permissions.effective();
     let remote_allowed = rules.command != Rule::Deny && rules.write != Rule::Deny;
-    let remote_agent = (selected.local_execution.is_some()
-        && selected.hermes_remote_approvals
-        && !Provider::is_openclaw_agent_model(&selected_model)
-        && remote_allowed)
-        .then(|| Arc::new((selected, selected_model)));
-    if provider.hermes_remote_approvals {
+    let paired = selected.local_execution.is_some();
+    let Some(execution) = cancel
+        .run_until_cancelled(providers::tool_execution(&app.client, &provider, &model))
+        .await
+    else {
+        bail!("The turn was stopped before it was sent.");
+    };
+    let execution = execution?;
+    let on_hermes = execution == providers::ToolExecution::Hermes;
+    if on_hermes {
         ensure!(
-            thread.mode == Mode::Chat,
-            "Use a Hermes inference proxy for local Code Agent tools."
+            !paired,
+            "Local execution model unavailable. Choose a separate inference connection and model in Provider settings."
         );
         ensure!(
             remote_allowed,
             "The current permission profile blocks remote Hermes Agent runs."
         );
     }
+    let hermes_workspace = on_hermes && thread.mode == Mode::Agent && thread.workspace.is_some();
+    let bridge_settings = data.workspace_bridge.as_ref().filter(|_| hermes_workspace);
+    let root = if !on_hermes || hermes_workspace {
+        let root = thread
+            .workspace
+            .as_deref()
+            .map(agent::checked_root)
+            .transpose()?;
+        if let Some(root) = &root {
+            guard.lock_workspace(root)?;
+        }
+        root
+    } else {
+        None
+    };
+    let remote_agent = (paired
+        && selected.hermes_remote_approvals
+        && !Provider::is_openclaw_agent_model(&selected_model)
+        && remote_allowed)
+        .then(|| Arc::new((selected, selected_model)));
     let new_message = matches!(&input, TurnInput::New(_));
     let mut message = match input {
         TurnInput::New(prompt) => {
@@ -3095,27 +3360,6 @@ async fn run_user_turn(
     {
         bail!("Choose a PDF-capable API provider for {}.", file.name);
     }
-    let Some(endpoint_check) = cancel
-        .run_until_cancelled(providers::ensure_client_tool_endpoint(
-            &app.client,
-            &provider,
-            &model,
-        ))
-        .await
-    else {
-        bail!("The turn was stopped before it was sent.");
-    };
-    endpoint_check?;
-    let thread = if new_message {
-        app.store.change(|data| {
-            let thread = thread_mut(data, id)?;
-            thread.append_user_message(message.clone());
-            Ok(thread.clone())
-        })?
-    } else {
-        // The prompt is already stored in the branch, including attachments.
-        thread.clone()
-    };
     let turn = Turn {
         app: Arc::clone(app),
         window,
@@ -3127,12 +3371,75 @@ async fn run_user_turn(
         remote_agent,
         remote_activity: Arc::new(AsyncMutex::new(None)),
     };
+    if on_hermes && thread.mode == Mode::Agent {
+        let source = format!("Hermes server · {}", provider.name);
+        let details = json!({
+            "conversation": thread.title,
+            "destination": "Hermes server",
+            "local_workspace": turn.root,
+            "data": "Conversation history and attachments",
+            "tools": if hermes_workspace {
+                "Hermes VPS and the selected OpenDex workspace. Local tool results are sent to Hermes."
+            } else {
+                "Hermes VPS. The selected OpenDex workspace is unavailable on this route."
+            }
+        });
+        let allowed = cancel
+            .run_until_cancelled(turn.approve(
+                "sending this turn to Hermes",
+                &details,
+                &source,
+                Rule::Ask,
+            ))
+            .await
+            .context("The turn was stopped before it was sent.")?;
+        ensure!(allowed, "Hermes server turn declined.");
+    }
+    let workspace = if let Some(settings) = bridge_settings {
+        match app.workspace_bridge(settings).await {
+            Ok(bridge) => Some(
+                bridge
+                    .as_ref()
+                    .expect("started workspace toolset")
+                    .register(workspace_bridge::Access::Turn),
+            ),
+            Err(error) => {
+                turn.event("notice", json!({"message":format!("Workspace MCP listener unavailable. Using the Hermes connection for local tools. {error:#}")}));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    ensure!(
+        !cancel.is_cancelled(),
+        "The turn was stopped before it was sent."
+    );
+    let thread = if new_message {
+        app.store.change(|data| {
+            let thread = thread_mut(data, id)?;
+            thread.append_user_message(message.clone());
+            Ok(thread.clone())
+        })?
+    } else {
+        // The prompt is already stored in the branch, including attachments.
+        thread.clone()
+    };
     let message_id = message.id;
     attachment_previews(&mut message);
     turn.event("accepted", json!({"message":message,"title":thread.title}));
     let provider_id = provider.id;
-    if provider.hermes_remote_approvals {
-        let result = complete_hermes_turn(&turn, &data, thread, &provider, &model, &cancel).await;
+    if on_hermes {
+        let location = if hermes_workspace {
+            "Hermes · workspace and VPS tools"
+        } else {
+            "Hermes VPS"
+        };
+        turn.event(
+            "notice",
+            json!({"message": format!("{location} · {}", provider.name)}),
+        );
+        let result = complete_hermes_turn(&turn, &data, thread, &provider, &model, workspace).await;
         turn.save_partial(model, provider_id)?;
         return result;
     }
@@ -3213,6 +3520,86 @@ fn stop_turn(app: AppState<'_>, id: Uuid) -> Reply<()> {
         cancel.cancel();
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn share_workspace(app: AppState<'_>, window: AppHandle, id: Uuid) -> Reply<String> {
+    reply(
+        async {
+            let data = app.store.snapshot();
+            let thread = fetch_thread(&data, id)?;
+            ensure!(
+                thread.mode == Mode::Agent,
+                "Open this project in Code Agent to share it."
+            );
+            let root = agent::checked_root(
+                thread
+                    .workspace
+                    .as_deref()
+                    .context("Choose a project folder.")?,
+            )?;
+            let settings = data
+                .workspace_bridge
+                .as_ref()
+                .context("Enable the workspace toolset in Settings → MCP Servers.")?;
+            let mut url = settings.url()?;
+            let cancel = CancellationToken::new();
+            let mut guard = {
+                let mut runs = app.runs.lock().expect("runs lock");
+                ensure!(!runs.contains_key(&id), "Stop the current turn first.");
+                runs.insert(id, cancel.clone());
+                RunGuard {
+                    state: Arc::clone(&app),
+                    thread: id,
+                    root: None,
+                }
+            };
+            guard.lock_workspace(&root)?;
+            let (lease, mut requests) = {
+                let bridge = app.workspace_bridge(settings).await?;
+                bridge
+                    .as_ref()
+                    .expect("started workspace toolset")
+                    .register(workspace_bridge::Access::Link)
+            };
+            url.path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("Invalid workspace MCP URL."))?
+                .pop_if_empty()
+                .push(&lease.ticket.to_string());
+            let turn = Turn {
+                app: Arc::clone(&app),
+                window,
+                id,
+                root: Some(root),
+                rules: data.permissions.effective(),
+                partial: Arc::new(Mutex::new(String::new())),
+                cancel: cancel.clone(),
+                remote_agent: None,
+                remote_activity: Arc::new(AsyncMutex::new(None)),
+            };
+            tauri::async_runtime::spawn(async move {
+                let work = async {
+                    let mut used = 0;
+                    while let Some(call) = requests.recv().await {
+                        turn.bridged_call(call, &mut used, "Local workspace · external MCP client")
+                            .await;
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {},
+                    _ = lease.stop.cancelled() => {},
+                    _ = tokio::time::sleep(Duration::from_secs(30 * 60)) => {},
+                    _ = work => {},
+                }
+                drop(lease);
+                drop(guard);
+                turn.event("workspace_share_ended", json!({}));
+            });
+            Ok(url.to_string())
+        }
+        .await,
+    )
 }
 
 #[tauri::command]
@@ -3297,24 +3684,35 @@ pub fn run() {
             } else {
                 app.path().app_data_dir()?
             };
-            app.manage(Arc::new(Desktop {
+            let desktop = Arc::new(Desktop {
                 store: Store::open(&home)?,
                 client: providers::client()?,
                 codex_home: home.join("codex"),
                 runs: Mutex::new(HashMap::new()),
                 workspaces: Mutex::new(HashSet::new()),
                 approvals: Mutex::new(HashMap::new()),
+                workspace_bridge: AsyncMutex::new(None),
                 codex_lock: AsyncMutex::new(()),
                 claude_lock: AsyncMutex::new(()),
                 backup_lock: AsyncMutex::new(()),
                 speech: Mutex::new(None),
                 dictation: AsyncMutex::new(None),
                 model_download: AsyncMutex::new(()),
-            }));
+            });
+            if let Some(settings) = desktop.store.inspect(|data| data.workspace_bridge.clone()) {
+                let desktop = Arc::clone(&desktop);
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = desktop.workspace_bridge(&settings).await {
+                        eprintln!("OpenDex workspace toolset: {error:#}");
+                    }
+                });
+            }
+            app.manage(desktop);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            configure_workspace_bridge,
             save_provider,
             add_provider_models,
             remove_provider_model,
@@ -3370,6 +3768,7 @@ pub fn run() {
             save_generated_image,
             reply_in_branch,
             stop_turn,
+            share_workspace,
             resolve_approval
         ])
         .run(context)
@@ -3379,6 +3778,18 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hermes_stall_deadline_pauses_for_approval_and_uses_the_latest_progress() {
+        let limit = Duration::from_secs(3);
+        let (progress, updates) = watch::channel(None);
+        let mut timeout = std::pin::pin!(wait_for_hermes_stall(updates));
+        assert!(futures_util::poll!(&mut timeout).is_pending());
+        progress.send_replace(Some(Instant::now() + limit));
+        assert!(futures_util::poll!(&mut timeout).is_pending());
+        progress.send_replace(Some(Instant::now()));
+        timeout.await;
+    }
 
     #[test]
     fn project_handoff_only_accepts_a_single_new_folder_name() {

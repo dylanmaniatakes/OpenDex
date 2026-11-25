@@ -11,3 +11,7 @@ pub mod state;
 pub mod transcription;
 pub mod voice;
 pub mod web;
+#[cfg(feature = "desktop")]
+mod workspace_bridge;
+#[cfg(feature = "desktop")]
+mod workspace_relay;

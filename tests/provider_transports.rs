@@ -2,7 +2,7 @@ use opendex::{
     codex::Bridge,
     images,
     mcp::Connection,
-    providers::{self, Tool},
+    providers::{self, Tool, ToolExecution},
     state::{
         Attachment, LocalExecutionModel, Message, Provider, ProviderKind, Role, Server, Transport,
     },
@@ -423,8 +423,8 @@ async fn comfy_library_inspects_nodes_and_saves_a_new_named_graph() {
 }
 
 #[tokio::test]
-async fn agent_gateway_requires_opt_in_and_approval_support_for_remote_hermes() {
-    let fixture = Fixture::new(4, |request| {
+async fn hermes_routes_agent_approvals_to_the_server_and_inference_tools_to_opendex() {
+    let fixture = Fixture::new(10, |request| {
         match request.line.split_whitespace().nth(1).unwrap() {
             "/api-prefix/capabilities" => (
                 "application/json",
@@ -441,45 +441,102 @@ async fn agent_gateway_requires_opt_in_and_approval_support_for_remote_hermes() 
                 String::new(),
                 json!({"object":"inference.capabilities"}).to_string(),
             ),
+            "/legacy/capabilities" => (
+                "application/json",
+                String::new(),
+                json!({"platform":"hermes-agent","features":{"streaming":true}}).to_string(),
+            ),
+            "/proxy/capabilities" | "/custom-agent/capabilities" => (
+                "text/plain",
+                String::new(),
+                "Capabilities unavailable".into(),
+            ),
+            "/proxy/models" => (
+                "application/json",
+                String::new(),
+                json!({"data":[{"id":"Hermes-4-70B","owned_by":"nousresearch"}]}).to_string(),
+            ),
+            "/custom-agent/models" => (
+                "application/json",
+                String::new(),
+                json!({"data":[{"id":"custom-alias","owned_by":"hermes"}]}).to_string(),
+            ),
             path => panic!("Unexpected request for {path}"),
         }
     });
     let client = providers::client().unwrap();
     let mut provider = provider(&fixture, ProviderKind::OpenAiCompatible);
     assert!(
-        providers::ensure_client_tool_endpoint(&client, &provider, "hermes-agent")
+        providers::tool_execution(&client, &provider, "hermes-agent")
             .await
             .unwrap_err()
             .to_string()
             .contains("Hermes Agent API")
     );
     assert!(
-        providers::ensure_client_tool_endpoint(&client, &provider, "custom-alias")
+        providers::tool_execution(&client, &provider, "custom-alias")
             .await
             .unwrap_err()
             .to_string()
             .contains("Hermes Agent API")
     );
     provider.hermes_remote_approvals = true;
-    providers::ensure_client_tool_endpoint(&client, &provider, "hermes-agent")
-        .await
-        .unwrap();
-    provider.endpoint = format!("{}/inference", fixture.endpoint);
+    for model in ["hermes-agent", "custom-alias"] {
+        assert_eq!(
+            providers::tool_execution(&client, &provider, model)
+                .await
+                .unwrap(),
+            ToolExecution::Hermes
+        );
+    }
+    provider.endpoint = format!("{}/legacy", fixture.endpoint);
     assert!(
-        providers::ensure_client_tool_endpoint(&client, &provider, "Hermes-4-70B")
+        providers::tool_execution(&client, &provider, "hermes-agent")
             .await
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .contains("does not advertise Hermes command approvals")
     );
-    provider.hermes_remote_approvals = false;
-    providers::ensure_client_tool_endpoint(&client, &provider, "Hermes-4-70B")
-        .await
-        .unwrap();
+    provider.endpoint = format!("{}/inference", fixture.endpoint);
+    assert_eq!(
+        providers::tool_execution(&client, &provider, "Hermes-4-70B")
+            .await
+            .unwrap(),
+        ToolExecution::Local
+    );
+    provider.endpoint = format!("{}/proxy", fixture.endpoint);
+    assert_eq!(
+        providers::tool_execution(&client, &provider, "Hermes-4-70B")
+            .await
+            .unwrap(),
+        ToolExecution::Local
+    );
+    assert!(
+        providers::tool_execution(&client, &provider, "hermes-agent")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Could not verify Hermes command approval support")
+    );
+    provider.endpoint = format!("{}/custom-agent", fixture.endpoint);
+    assert!(
+        providers::tool_execution(&client, &provider, "custom-alias")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Could not confirm whether this connection runs tools on the server")
+    );
     fixture.finish();
 }
 
 #[test]
 fn a_paired_model_is_used_for_local_execution_and_does_not_fall_back_to_the_vps() {
-    let mut inference = Provider::local();
+    let mut inference = Provider {
+        kind: ProviderKind::OpenAiCompatible,
+        endpoint: "http://127.0.0.1:8645/v1".into(),
+        hermes_remote_approvals: true,
+        ..Provider::local()
+    };
     inference.models.push("local-fixture".into());
     let agent = Provider {
         kind: ProviderKind::OpenAiCompatible,
