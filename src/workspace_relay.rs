@@ -135,25 +135,24 @@ fn extract(segment: &str, grant: Uuid) -> Result<(ToolCall, usize), String> {
     {
         return Ok((validate(request, grant)?, end));
     }
-    let Some((name, name_end)) = attribute(segment, &["name", "tool"]) else {
+    let Some((name, name_end)) = lookup(segment, &["name", "tool"]) else {
         return Err("OpenDex could not find the request JSON in the envelope.".into());
     };
-    let granted = match attribute(segment, &["grant", "workspace_session"]) {
+    let granted = match lookup(segment, &["grant", "workspace_session"]) {
         Some((raw, end)) => match raw.parse::<Uuid>() {
             Ok(value) => (Some(value), end),
             Err(_) => return Err("The request carried an unreadable workspace grant.".into()),
         },
         None => (None, 0),
     };
-    let (arguments, arguments_end) = attribute(segment, &["arguments", "args", "input"])
-        .map_or_else(
-            || (no_arguments(), 0),
-            |(raw, end)| {
-                let value =
-                    serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "input": raw }));
-                (value, end)
-            },
-        );
+    let (arguments, arguments_end) = lookup(segment, &["arguments", "args", "input"]).map_or_else(
+        || (no_arguments(), 0),
+        |(raw, end)| {
+            let value =
+                serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({ "input": raw }));
+            (value, end)
+        },
+    );
     let request = Request {
         grant: granted.0,
         name,
@@ -259,6 +258,40 @@ fn attribute(text: &str, keys: &[&str]) -> Option<(String, usize)> {
         }
     }
     None
+}
+
+/// `<parameter name="key" string="true">value</parameter>`, the markup models
+/// borrow from other tool-call conventions, with the offset after the value.
+fn parameter(text: &str, keys: &[&str]) -> Option<(String, usize)> {
+    let close = "</parameter>";
+    let mut from = 0;
+    while let Some(hit) = text[from..].find("<parameter") {
+        let at = from + hit;
+        from = at + "<parameter".len();
+        let Some(end) = text[at..].find('>') else {
+            return None;
+        };
+        let Some((name, _)) = attribute(&text[at..at + end], &["name"]) else {
+            continue;
+        };
+        if !keys.contains(&name.as_str()) {
+            continue;
+        }
+        let start = at + end + 1;
+        let stop = text[start..]
+            .find(close)
+            .map_or(text.len(), |index| start + index);
+        let value = text[start..stop].trim();
+        if !value.is_empty() {
+            return Some((value.to_owned(), (stop + close.len()).min(text.len())));
+        }
+    }
+    None
+}
+
+/// A field of the envelope in whichever notation the reply used.
+fn lookup(text: &str, keys: &[&str]) -> Option<(String, usize)> {
+    parameter(text, keys).or_else(|| attribute(text, keys))
 }
 
 /// The envelope's tag name with punctuation removed, for near-miss matching.
@@ -500,6 +533,16 @@ mod tests {
         let call = &calls(request(&drifted, grant))[0];
         assert_eq!(call.name, "list_files");
         assert_eq!(call.arguments, json!({}));
+
+        // Recorded reply: the envelope in `<parameter>` markup, which models
+        // borrow from other tool-call conventions.
+        let parameters = format!(
+            "<opendex-workspace-call\"> <parameter name=\"grant\" string=\"true\">{grant}</parameter>\n<parameter name=\"name\" string=\"true\">read_file</parameter>\n<parameter name=\"arguments\" string=\"false\">{}</parameter>\n{CLOSE}\n",
+            json!({"path": "tools/free_wine_dispatch.py"})
+        );
+        let call = &calls(request(&parameters, grant))[0];
+        assert_eq!(call.name, "read_file");
+        assert_eq!(call.arguments["path"], "tools/free_wine_dispatch.py");
 
         // The same drift stays out of the live view while it streams.
         let mut display = Display::default();

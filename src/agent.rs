@@ -642,11 +642,7 @@ fn scoped_command(
         #[cfg(target_os = "macos")]
         {
             let escaped_root = seatbelt_string(root)?;
-            let file_rules = if policy.read == Rule::Deny {
-                String::new()
-            } else {
-                format!("(allow file-read-data (subpath {escaped_root}))")
-            };
+            let file_rules = command_read_rule(root, policy)?;
             let write_rules = if policy.write == Rule::Deny {
                 String::new()
             } else {
@@ -694,7 +690,41 @@ fn scoped_command(
     Ok(command)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
+/// Read scope for an isolated command: the project, and the drive it lives on.
+///
+/// A project on an external volume needs to reach its own runtime, sibling
+/// folders and the mount list. Writes stay inside the project.
+fn command_read_rule(root: &Path, policy: &Permissions) -> Result<String> {
+    if policy.read == Rule::Deny {
+        return Ok(String::new());
+    }
+    let mut rule = format!("(allow file-read-data (subpath {})", seatbelt_string(root)?);
+    if let Some(volume) = volume_root(root) {
+        rule.push_str(&format!(
+            " (literal \"/Volumes\") (subpath {})",
+            seatbelt_string(&volume)?
+        ));
+    }
+    rule.push(')');
+    Ok(rule)
+}
+
+#[cfg(any(target_os = "macos", test))]
+/// The mount point a project on an external volume belongs to, if any.
+fn volume_root(root: &Path) -> Option<PathBuf> {
+    let mut parts = root.components();
+    if parts.next()? != Component::RootDir {
+        return None;
+    }
+    if parts.next()?.as_os_str().to_str() != Some("Volumes") {
+        return None;
+    }
+    let name = parts.next()?;
+    Some(Path::new("/Volumes").join(name.as_os_str()))
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn seatbelt_string(path: &Path) -> Result<String> {
     let path = path
         .to_str()
@@ -773,6 +803,36 @@ impl Drop for ProcessGroup {
 mod tests {
     use super::*;
     use crate::state::Profile;
+
+    #[test]
+    fn isolated_commands_can_read_the_volume_their_project_lives_on() {
+        let policy = Permissions::default();
+        let rule = command_read_rule(Path::new("/Volumes/Scratch/StarCreate"), &policy).unwrap();
+        assert!(
+            rule.contains("(subpath \"/Volumes/Scratch/StarCreate\")"),
+            "{rule}"
+        );
+        assert!(rule.contains("(literal \"/Volumes\")"), "{rule}");
+        assert!(rule.contains("(subpath \"/Volumes/Scratch\")"), "{rule}");
+        assert!(!rule.contains("file-write"), "{rule}");
+
+        // A project on the boot volume gets no extra read scope.
+        let rule =
+            command_read_rule(Path::new("/Users/ticnitsi/Documents/OpenDex"), &policy).unwrap();
+        assert_eq!(
+            rule,
+            "(allow file-read-data (subpath \"/Users/ticnitsi/Documents/OpenDex\"))"
+        );
+
+        // A denied read scope grants nothing.
+        let mut denied = Permissions::default();
+        denied.read = Rule::Deny;
+        assert_eq!(
+            command_read_rule(Path::new("/Volumes/Scratch/StarCreate"), &denied).unwrap(),
+            ""
+        );
+        assert_eq!(volume_root(Path::new("/Volumes")), None);
+    }
 
     #[test]
     fn always_allow_upgrades_only_the_requested_category() {

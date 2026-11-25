@@ -176,6 +176,7 @@ export function settingsPanel(api) {
       { rows: 2, spellcheck: 'false', placeholder: 'X-Organization=MY_ORG' });
     let forget = false;
     let hermesApprovals = Boolean(provider.hermes_remote_approvals);
+    let hermesSendTrusted = Boolean(provider.hermes_send_trusted);
     let localExecution = provider.local_execution ?? null;
     const executionValue = (selection) => selection ? JSON.stringify([selection.provider, selection.model]) : '';
     const localModels = api.data().providers.filter((candidate) => candidate.id !== provider.id
@@ -216,7 +217,8 @@ export function settingsPanel(api) {
             localExecution = value ? { provider, model } : null;
           }), 'For a server agent such as Hermes, pair a saved inference model so OpenDex can run workspace tools on this computer.'),
           check('Allow Hermes VPS tasks and relay command approvals', hermesApprovals, (value) => { hermesApprovals = value; }),
-          el('p', { class: 'field-note' }, 'With a paired model, OpenDex asks before sending a task to the VPS. Direct Agent turns from Code Agent require approval before sending. Hermes decides which VPS commands require approval.'),
+          check('Send turns without asking', hermesSendTrusted, (value) => { hermesSendTrusted = value; }),
+          el('p', { class: 'field-note' }, 'With a paired model, OpenDex asks before sending a task to the VPS. Direct Agent turns from Code Agent require approval before sending unless you allow sending without asking. Hermes decides which VPS commands require approval.'),
           !adding && button('OpenDex workspace toolset', () => open('mcp'), { style: 'text-link' })),
         el('details', { class: 'wide inset' }, el('summary', {}, 'Advanced connection settings'),
           el('div', { class: 'form-grid compact' }, field('Output token limit', tokenLimit),
@@ -268,6 +270,7 @@ export function settingsPanel(api) {
           anthropic_auth: anthropic ? anthropicAuth : 'api',
           claude_path: claudePath.value,
           hermes_remote_approvals: provider.kind === 'open_ai_compatible' && hermesApprovals,
+          hermes_send_trusted: provider.kind === 'open_ai_compatible' && hermesApprovals && hermesSendTrusted,
           local_execution: provider.kind === 'open_ai_compatible' ? localExecution : null,
         };
         const value = { ...provider, ...valuePatch };

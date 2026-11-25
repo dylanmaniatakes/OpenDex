@@ -78,6 +78,9 @@ pub struct Provider {
     pub claude_path: String,
     #[serde(default)]
     pub hermes_remote_approvals: bool,
+    /// Send Code Agent turns to this Hermes server without a per-turn prompt.
+    #[serde(default)]
+    pub hermes_send_trusted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_execution: Option<LocalExecutionModel>,
 }
@@ -103,6 +106,7 @@ impl Provider {
             anthropic_auth: AnthropicAuth::Api,
             claude_path: default_claude_path(),
             hermes_remote_approvals: false,
+            hermes_send_trusted: false,
             local_execution: None,
         }
     }
@@ -198,6 +202,7 @@ impl Provider {
         normalize_models(&mut self.models)?;
         if self.kind != ProviderKind::OpenAiCompatible {
             self.hermes_remote_approvals = false;
+            self.hermes_send_trusted = false;
             self.local_execution = None;
         }
         if let Some(selection) = &self.local_execution {

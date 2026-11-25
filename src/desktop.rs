@@ -3521,6 +3521,7 @@ async fn run_user_turn(
     let rules = data.permissions.effective();
     let remote_allowed = rules.command != Rule::Deny && rules.write != Rule::Deny;
     let paired = selected.local_execution.is_some();
+    let trusted_send = selected.hermes_send_trusted;
     let Some(execution) = cancel
         .run_until_cancelled(providers::tool_execution(&app.client, &provider, &model))
         .await
@@ -3630,7 +3631,7 @@ async fn run_user_turn(
                 "sending this turn to Hermes",
                 &details,
                 &source,
-                Rule::Ask,
+                if trusted_send { Rule::Allow } else { Rule::Ask },
             ))
             .await
             .context("The turn was stopped before it was sent.")?;
