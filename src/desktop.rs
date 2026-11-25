@@ -2714,7 +2714,10 @@ type HermesMcpWorkspace = (
 struct HermesWorkspace {
     bridge: Option<HermesMcpWorkspace>,
     used: u8,
-    relay: bool,
+    /// One grant covers the whole turn: a model that carries its earlier reply
+    /// forward keeps a valid grant instead of tripping over a rotated one.
+    grant: Option<Uuid>,
+    repairs: u8,
 }
 
 async fn complete_hermes_turn(
@@ -2729,11 +2732,12 @@ async fn complete_hermes_turn(
     let mut workspace = HermesWorkspace {
         bridge,
         used: 0,
-        relay: !tools.is_empty(),
+        grant: (!tools.is_empty()).then(Uuid::new_v4),
+        repairs: 0,
     };
     let mut messages = portable_history(thread.messages);
     loop {
-        let grant = workspace.relay.then(Uuid::new_v4);
+        let grant = workspace.grant;
         let execution = match grant {
             Some(grant) => workspace_relay::instructions(grant, &tools),
             None => {
@@ -2753,44 +2757,72 @@ async fn complete_hermes_turn(
             turn.event("stopped", json!({}));
             return Ok(());
         };
-        let call = match grant {
-            Some(grant) => workspace_relay::request(&answer.text, grant)?,
-            None => None,
+        let answer_text = answer.text;
+        let outcome = match grant {
+            Some(grant) => workspace_relay::request(&answer_text, grant),
+            None => workspace_relay::Outcome::Answer,
         };
-        let Some(call) = call else {
-            return turn.checkpoint(assistant_message(answer.text, provider, model));
+        let calls = match outcome {
+            workspace_relay::Outcome::Answer => {
+                return turn.checkpoint(assistant_message(answer_text, provider, model));
+            }
+            workspace_relay::Outcome::Calls(calls) => calls,
+            workspace_relay::Outcome::Invalid(reason) => {
+                // A workspace envelope that cannot run is not an answer. Tell
+                // Hermes exactly what was wrong and let it resend, instead of
+                // showing the reply as chat and stalling the turn.
+                ensure!(
+                    workspace.repairs < 2,
+                    "Hermes could not send a usable workspace request. {reason}"
+                );
+                workspace.repairs += 1;
+                turn.partial.lock().expect("stream buffer").clear();
+                turn.event("reset_stream", json!({}));
+                turn.event(
+                    "notice",
+                    json!({"message":format!("Hermes sent a workspace request OpenDex could not run. Asking it to resend · {reason}")}),
+                );
+                messages.push(Message::new(Role::Assistant, &answer_text));
+                messages.push(Message::new(
+                    Role::User,
+                    workspace_relay::retry(&reason, grant.expect("relay grant")),
+                ));
+                continue;
+            }
         };
         turn.partial.lock().expect("stream buffer").clear();
         turn.event("reset_stream", json!({}));
-        ensure!(
-            workspace.used < turn.rules.max_steps,
-            "Hermes reached the OpenDex workspace tool limit."
-        );
         turn.event(
             "notice",
-            json!({"message":format!("Hermes requested a local tool · {}",call.name)}),
+            json!({"message":if calls.len() == 1 {
+                format!("Hermes requested a local tool · {}", calls[0].name)
+            } else {
+                format!("Hermes requested {} local tools · {}", calls.len(),
+                    calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>().join(", "))
+            }}),
         );
-        let executed = turn
-            .cancel
-            .run_until_cancelled(turn.shared_workspace_call(
-                &call,
-                &mut workspace.used,
-                "Local workspace · requested by Hermes",
-            ))
-            .await;
-        let Some((ok, output)) = executed else {
-            turn.event("stopped", json!({}));
-            return Ok(());
-        };
+        let mut results = Vec::new();
+        for call in &calls {
+            let executed = turn
+                .cancel
+                .run_until_cancelled(turn.shared_workspace_call(
+                    call,
+                    &mut workspace.used,
+                    "Local workspace · requested by Hermes",
+                ))
+                .await;
+            let Some((ok, output)) = executed else {
+                turn.event("stopped", json!({}));
+                return Ok(());
+            };
+            results.push(workspace_relay::result(&call.name, ok, &output));
+        }
         turn.event(
             "notice",
             json!({"message":"Sending the workspace tool result to Hermes…"}),
         );
-        messages.push(Message::new(Role::Assistant, &answer.text));
-        messages.push(Message::new(
-            Role::User,
-            workspace_relay::result(&call.name, ok, &output),
-        ));
+        messages.push(Message::new(Role::Assistant, &answer_text));
+        messages.push(Message::new(Role::User, results.join("\n\n")));
     }
 }
 
@@ -2803,7 +2835,7 @@ async fn run_hermes_step(
     workspace: &mut HermesWorkspace,
 ) -> Result<Option<providers::Completion>> {
     let mut display = workspace_relay::Display::default();
-    let relay = workspace.relay;
+    let relay = workspace.grant.is_some();
     let run_id = Mutex::new(None::<String>);
     let (send, mut receive) = mpsc::channel(8);
     let (progress, updates) = watch::channel(Some(Instant::now() + HERMES_IDLE_LIMIT));
@@ -2874,6 +2906,10 @@ async fn run_hermes_step(
             },
         }
     };
+    if matches!(&result, Ok(Some(_))) {
+        // Release text held back only because it could have started an envelope.
+        display.finish(|visible| turn.delta(visible));
+    }
     if !matches!(&result, Ok(Some(_))) {
         let id = run_id.into_inner().expect("Hermes run lock");
         if let Some(id) = id {

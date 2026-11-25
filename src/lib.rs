@@ -13,5 +13,6 @@ pub mod voice;
 pub mod web;
 #[cfg(feature = "desktop")]
 mod workspace_bridge;
-#[cfg(feature = "desktop")]
+// Parsing of the workspace reply envelope is pure text handling, so it stays
+// compiled (and tested) without the desktop feature.
 mod workspace_relay;

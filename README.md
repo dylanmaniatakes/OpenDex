@@ -118,6 +118,12 @@ In a Code Agent conversation with a project, open **Conversation settings → Sh
 
 Both routes return local tool results to the requesting client. OpenDex enforces the selected workspace and read permissions, and asks before local edits and commands. VPS command prompts follow the Hermes server's policy.
 
+#### When no callback route is available
+
+With direct Hermes access and no reachable MCP endpoint, OpenDex shares the project over the Hermes connection itself. Each turn's instructions carry a workspace grant and the tool list, and Hermes ends a reply with one envelope per local call, for example `<opendex-workspace-call>{"grant":"…","name":"read_file","arguments":{"path":"src/main.rs"}}</opendex-workspace-call>`. OpenDex runs each call with your permissions, shows it in the conversation, returns the results to Hermes, and lets it continue. Hermes can ask for several calls in one reply and they run in the order given.
+
+The grant covers one turn. A call that arrives without the current grant, for a tool this turn does not offer, or in a form OpenDex cannot read is never run: OpenDex shows what was wrong and asks Hermes to resend it, so a malformed request does not end the turn as a chat reply. Reasoning, tool activity, and server status from Hermes appear as progress notices while the turn runs.
+
 OpenClaw agent targets can be paired for local work. The pairing follows the published [OpenClaw documentation](https://docs.openclaw.ai/gateway/openai-http-api) and still needs live testing. Native approvals use the separate [OpenClaw Gateway protocol](https://docs.openclaw.ai/gateway/protocol).
 
 ## MCP and web search
