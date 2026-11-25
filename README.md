@@ -7,7 +7,11 @@ OpenDex is a desktop workspace for chatting with AI models and working on local 
 - **Independent services** let you choose separate providers for chat, web search, image generation, speech, and dictation.
 - **MCP connections** add tools, resources, and reusable prompts. A paired Hermes connection can handle approved tasks on a VPS while OpenDex continues to run workspace tools locally.
 
-The desktop app has been tested on Apple Silicon macOS. Windows and Linux builds and desktop behavior are unverified. See [platform prerequisites](#prerequisites) and [command isolation](#permissions) before relying on a build on another platform.
+The first release is available as an [Apple Silicon macOS download](https://github.com/dylanmaniatakes/OpenDex/releases/tag/v1.0.0). Apple Silicon macOS is the tested desktop platform so far. See [platform plans and ways to help](#roadmap-and-community) for Linux, Windows, and Android.
+
+![Model Chat with a local Ollama model, conversation history, and the composer](docs/screenshots/model-chat.png)
+
+Screenshots use sample conversations and connections in the unbundled frontend.
 
 ## Contents
 
@@ -18,12 +22,14 @@ The desktop app has been tested on Apple Silicon macOS. Windows and Linux builds
 - [MCP and web search](#mcp-and-web-search)
 - [Generate images](#generate-images)
 - [Voice and dictation](#voice-and-dictation)
+- [Customize your workspace](#customize-your-workspace)
 - [Data, privacy, and backups](#data-privacy-and-backups)
 - [Build and test](#build-and-test)
+- [Roadmap and community](#roadmap-and-community)
 
 ## Quick start
 
-1. Launch OpenDex. See [Build and test](#build-and-test) to run it from source.
+1. Download OpenDex for Apple Silicon macOS, unzip it, and move `OpenDex.app` to Applications. The build is ad-hoc signed and distributed without notarization. See [Build and test](#build-and-test) to run it from source.
 2. Choose an existing model in **Model Chat**. For a running local Ollama server, use **Find local models**. For another service, go to **Settings → Providers → Add provider**, choose an adapter, and enter the service URL and credentials.
 3. Save the connection. Choose **Discover models** and add the models you want in the picker, or enter model IDs manually with **Add models**.
 4. Select the provider and model in the composer and send a message. **Enter** sends, **Shift+Enter** inserts a new line, and **Stop** interrupts a running turn.
@@ -68,6 +74,8 @@ OpenDex supplies the active model with the tools available for the current turn 
 | **Full access** | Runs workspace commands with your desktop user's privileges and network access. MCP calls and web requests still prompt. |
 
 Workspace and Custom shell command isolation currently use macOS Seatbelt. On other platforms, scoped commands are unavailable. Full access permits unisolated shell commands. Built-in file tools enforce project path checks. Local MCP executables start separately with your desktop user's privileges, so only configure servers you trust.
+
+![Code Agent showing a proposed README edit and the Deny and Allow once controls](docs/screenshots/code-agent-approval.png)
 
 ## Connect a remote agent
 
@@ -136,6 +144,19 @@ For local Whisper, choose a listed model or an existing Whisper GGML `.bin` file
 
 Click the mic beside **Send** to start recording. Click it again to stop, transcribe, and send. You can cancel while recording. If sending fails before the message is accepted, the transcript stays in the draft. With an active voice, spoken messages receive both text and audio. Typed messages stay silent by default. Enable **Also read typed replies aloud** or use a reply's speaker button to hear them.
 
+![Voice settings showing a local Piper connection alongside OmniVoice and Kokoro](docs/screenshots/voice-settings.png)
+
+## Customize your workspace
+
+OpenDex lets you choose where each part of your workflow runs. You can chat through a local inference server, generate images on a self-hosted ComfyUI machine, and use a separate voice service. You can also keep your entire workflow local with compatible services. Choose the endpoints you trust for the data they receive.
+
+- **Appearance.** Under **Settings → Appearance**, choose a light, dark, or system theme, an accent color, a typeface, and a spacing preset. Adjust text size, conversation width, sidebar width, corner radius, and animations. Preview changes before saving, or restore the defaults.
+- **Models and services.** Pin the models you want in the picker and switch between them from the composer. Configure your own compatible endpoints for inference, speech, dictation, and image generation. Web search and MCP connections are optional.
+- **Instructions and project workflow.** Use **Settings → Instructions** for standing preferences. Add conversation-specific instructions, select which MCP servers that conversation can use, and choose a project for the Code Agent handoff.
+- **Permissions and data.** Choose how much access tools get and when they ask for approval. Keep workspace commands local, and opt into paired Hermes VPS delegation when you need it. Store your workspace in a directory you choose and transfer settings with an encrypted backup.
+
+![Appearance settings in light mode with controls for accent, typeface, spacing, text size, and layout](docs/screenshots/appearance.png)
+
 ## Data, privacy, and backups
 
 - OpenDex stores conversations, attachments, settings, and project links in its local workspace. To select another data directory, use `--data-dir` or set `OPENDEX_DATA_DIR`. The app supports one running copy per desktop user.
@@ -184,6 +205,8 @@ cargo test --locked --no-default-features --all-targets
 
 On shells with Bash, `bash scripts/check.sh` runs the full set. The no-default-features suite exercises the core without the desktop feature. The default suites use fixtures for provider and MCP requests and do not need service credentials. See [`tests/`](tests/) for optional tests that use installed CLI tools.
 
+The screenshots were captured from the source HTML, CSS, and JavaScript with a simulated desktop bridge. That check exercised model selection, sidebar search, attachment submission, both approval choices, voice settings, and saving appearance. It covers the frontend interactions independently of live services and native tool execution.
+
 ### Source layout
 
 | Path | Responsibility |
@@ -193,5 +216,11 @@ On shells with Bash, `bash scripts/check.sh` runs the full set. The no-default-f
 | [`src/providers/`](src/providers/) | Model discovery, provider payloads, streaming replies, and remote delegation |
 | [`src/state.rs`](src/state.rs) and [`src/backup.rs`](src/backup.rs) | Local state, credentials, and encrypted backup and restore |
 | [`ui/`](ui/) | Desktop interface written in HTML, CSS, and JavaScript |
+
+## Roadmap and community
+
+OpenDex has been tested on Apple Silicon macOS. Linux and Windows builds are next for platform testing, and feedback from people using different distributions, hardware, and providers is welcome. Please share reproducible steps, your OS and architecture, and the provider or feature involved in [GitHub Issues](https://github.com/dylanmaniatakes/OpenDex/issues). Testing reports, documentation improvements, and pull requests can all help make OpenDex easier to use.
+
+An **Android companion app** is a future goal. The idea is to use a phone for basic chat and to check on Code Agent work while away from the computer running OpenDex. It is planned for a later stage of development.
 
 OpenDex is available under the [MIT License](LICENSE).

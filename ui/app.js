@@ -485,10 +485,10 @@ function modelPicker(thread) {
     }),
   ] : []);
   const empty = !provider || !provider.models.length;
+  const execution = provider?.local_execution;
   $('composer-footer').replaceChildren(
     ...empty ? [button(provider ? 'Manage models' : 'Add a provider', () => settings.open('providers', provider?.id), { style: 'text-link' })]
-      : [provider?.local_execution && el('span', { title: provider.local_execution.model }, 'Local tools'),
-        provider?.local_execution && el('span', { class: 'footer-dot' }),
+      : [...(execution ? [el('span', { title: execution.model }, 'Local tools'), el('span', { class: 'footer-dot' })] : []),
         el('span', {}, 'Enter to send'), el('span', { class: 'footer-dot' }),
         el('span', {}, 'Shift + Enter for a new line')]);
 }
