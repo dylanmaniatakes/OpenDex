@@ -7,3 +7,15 @@
 .env.*
 /gen/
 __pycache__/
+
+# Local OpenDex state and exports
+/.opendex/
+/codex/
+/claude/
+workspace.json
+workspace.lock
+application.lock
+auth.json
+.credentials.json
+*.age
+conversation.md
