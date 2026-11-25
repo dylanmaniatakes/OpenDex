@@ -31,7 +31,7 @@ function exportForm(api, section, run) {
   field('New backup passphrase', password, 'Use at least 12 characters. You’ll need this passphrase to restore the backup.'),
   field('Confirm passphrase', repeated),
   el('div', { class: 'form-actions wide' }, save, status));
-  return section('Export settings', 'Includes provider and MCP keys, web search, image preferences, project links, permissions, appearance, and global instructions.', form);
+  return section('Export settings', 'Includes model, image, voice, dictation, and MCP connections and keys, web search, project links, permissions, appearance, and global instructions.', form);
 }
 
 function restoreForm(api, section, run, permissionName, onRestored) {
@@ -97,6 +97,8 @@ function restoreForm(api, section, run, permissionName, onRestored) {
       info.has_chatgpt_connection && el('p', { class: 'muted' }, info.has_chatgpt_session && !info.can_restore_chatgpt_session ? 'Includes a ChatGPT session that this platform cannot restore. Other settings and keys will restore. Sign in to ChatGPT afterward.' : info.has_chatgpt_session ? 'Includes a ChatGPT session. Restoring replaces the session in OpenDex’s dedicated Codex credential entry.' : 'No ChatGPT session is included. Sign in again under Providers → ChatGPT Account.'),
       showNames('Providers', info.providers),
       showNames('MCP servers', info.mcp_servers),
+      info.image_sources && showNames('Image sources', info.image_sources),
+      info.voice_profiles && showNames('Voice connections', info.voice_profiles),
       info.web_search && el('p', {}, 'Web search ', el('strong', {}, info.web_search)),
       info.image_model && el('p', {}, 'Image model ', el('strong', {}, info.image_model)),
       showNames('Enabled local MCP commands', info.local_servers),

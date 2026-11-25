@@ -1,6 +1,7 @@
 //! Provider adapters share a tool and transcript representation. Each adapter owns its
 //! request/stream formats so its native API remains usable through gateways.
 mod gemini;
+pub mod remote;
 mod wire;
 
 use crate::state::AnthropicAuth;
@@ -11,6 +12,7 @@ use reqwest::{Client, RequestBuilder, Response, header};
 use serde::Serialize;
 use serde_json::Value;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Tool {
@@ -24,6 +26,11 @@ pub struct Completion {
     pub text: String,
     pub calls: Vec<ToolCall>,
     pub output_items: Vec<Value>,
+}
+
+pub(crate) enum HermesControl {
+    Started(String),
+    Approval(Value),
 }
 
 pub fn client() -> Result<Client> {
@@ -158,6 +165,155 @@ pub async fn discover(client: &Client, provider: &Provider) -> Result<Vec<String
     Ok(models)
 }
 
+/// A Hermes Agent API request starts a server-side agent even if the client
+/// sends function schemas or omits tools. Only its inference proxy is suitable
+/// when OpenDex is responsible for executing and authorizing tools.
+pub async fn ensure_client_tool_endpoint(
+    client: &Client,
+    provider: &Provider,
+    model: &str,
+) -> Result<()> {
+    if provider.kind != ProviderKind::OpenAiCompatible {
+        return Ok(());
+    }
+    let message = "This is the Hermes Agent API. Choose a local execution model for this connection in Provider settings. Use the Hermes subscription proxy or another inference provider.";
+    ensure!(
+        provider.hermes_remote_approvals || !Provider::is_hermes_agent_model(model),
+        "{message}"
+    );
+    ensure!(
+        !Provider::is_openclaw_agent_model(model),
+        "This is an OpenClaw agent target. Choose a local execution model for this connection in Provider settings."
+    );
+    let timeout = if provider.hermes_remote_approvals {
+        5
+    } else {
+        2
+    };
+    if let Some(description) = endpoint_capabilities(client, provider, timeout).await? {
+        let hermes = description["object"] == "hermes.api_server.capabilities"
+            || description["platform"] == "hermes-agent";
+        if provider.hermes_remote_approvals {
+            ensure!(
+                remote::supports_approvals(&description),
+                "This endpoint does not advertise Hermes command approvals. Use the Hermes subscription proxy or update the Hermes Agent server."
+            );
+            return Ok(());
+        }
+        ensure!(!hermes, "{message}");
+        ensure!(
+            description["runtime"]["tool_execution"] != "server"
+                || description["runtime"]["split_runtime"] == true,
+            "This endpoint runs agent tools on its server. Choose a local execution model for this connection in Provider settings."
+        );
+    }
+    ensure!(
+        !provider.hermes_remote_approvals,
+        "Could not verify Hermes command approval support. Check the Agent API URL and key in Provider settings."
+    );
+    Ok(())
+}
+
+async fn endpoint_capabilities(
+    client: &Client,
+    provider: &Provider,
+    timeout: u64,
+) -> Result<Option<Value>> {
+    let mut url = endpoint(&provider.endpoint)?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("Invalid API endpoint."))?
+        .pop_if_empty()
+        .push("capabilities");
+    let probe = request(client, provider, client.get(url)).await?;
+    if let Ok(response) = probe.timeout(Duration::from_secs(timeout)).send().await
+        && response.status().is_success()
+        && let Ok(body) = bounded_text(response, 32 * 1024).await
+    {
+        return Ok(serde_json::from_str(&body).ok());
+    }
+    Ok(None)
+}
+
+pub(crate) async fn hermes_remote_completion(
+    client: &Client,
+    provider: &Provider,
+    model: &str,
+    system: &str,
+    messages: &[Message],
+    controls: mpsc::Sender<HermesControl>,
+    delta: impl FnMut(&str),
+) -> Result<Completion> {
+    let response = generation_response(client, provider, model, system, messages, &[]).await?;
+    ensure!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")),
+        "Hermes did not open a stream that can carry approvals."
+    );
+    decode_generation(response, provider.kind, delta, Some(&controls)).await
+}
+
+pub(crate) async fn resolve_hermes_approval(
+    client: &Client,
+    provider: &Provider,
+    approval: &Value,
+    allow: bool,
+) -> Result<()> {
+    let run = approval["run_id"]
+        .as_str()
+        .context("Hermes did not include a run ID for this approval.")?;
+    let request_id = approval["request_id"]
+        .as_str()
+        .or_else(|| approval["prompt_id"].as_str())
+        .filter(|id| !id.trim().is_empty() && id.len() <= 256)
+        .context("Hermes did not include an exact approval request ID.")?;
+    let mut body = serde_json::json!({
+        "request_id": request_id,
+        "choice": if allow { "once" } else { "deny" }
+    });
+    if let Some(generation) = approval["execution_generation"].as_u64() {
+        body["execution_generation"] = serde_json::json!(generation);
+    }
+    let url = hermes_control_endpoint(provider, run, "approval")?;
+    let request = request(client, provider, client.post(url)).await?;
+    checked(
+        request
+            .timeout(Duration::from_secs(10))
+            .json(&body)
+            .send()
+            .await?,
+    )
+    .await
+    .context("Hermes did not accept the approval decision.")?;
+    Ok(())
+}
+
+pub(crate) async fn stop_hermes_run(client: &Client, provider: &Provider, run: &str) -> Result<()> {
+    let url = hermes_control_endpoint(provider, run, "stop")?;
+    let request = request(client, provider, client.post(url)).await?;
+    checked(request.timeout(Duration::from_secs(10)).send().await?).await?;
+    Ok(())
+}
+
+fn hermes_control_endpoint(provider: &Provider, run: &str, action: &str) -> Result<reqwest::Url> {
+    ensure!(
+        !run.is_empty()
+            && run.len() <= 128
+            && run
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+        "Hermes did not include a valid run ID."
+    );
+    let mut url = endpoint(&provider.endpoint)?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("Invalid Hermes API endpoint."))?
+        .pop_if_empty()
+        .extend(["runs", run, action]);
+    Ok(url)
+}
+
 pub async fn generate(
     client: &Client,
     provider: &Provider,
@@ -165,25 +321,45 @@ pub async fn generate(
     system: &str,
     messages: &[Message],
     tools: &[Tool],
-    mut delta: impl FnMut(&str),
+    delta: impl FnMut(&str),
 ) -> Result<Completion> {
     if provider.kind == ProviderKind::Gemini {
         return gemini::generate(client, provider, model, system, messages, tools, delta).await;
     }
+    let response = generation_response(client, provider, model, system, messages, tools).await?;
+    decode_generation(response, provider.kind, delta, None).await
+}
+
+async fn generation_response(
+    client: &Client,
+    provider: &Provider,
+    model: &str,
+    system: &str,
+    messages: &[Message],
+    tools: &[Tool],
+) -> Result<Response> {
     let (path, payload) = wire::payload(provider, model, system, messages, tools)?;
     let mut url = endpoint(&provider.endpoint)?;
     url.path_segments_mut()
         .map_err(|_| anyhow::anyhow!("Invalid API endpoint."))?
         .pop_if_empty()
         .extend(path.split('/'));
-    let response = checked(
+    checked(
         request(client, provider, client.post(url))
             .await?
             .json(&payload)
             .send()
             .await?,
     )
-    .await?;
+    .await
+}
+
+async fn decode_generation(
+    response: Response,
+    kind: ProviderKind,
+    mut delta: impl FnMut(&str),
+    controls: Option<&mpsc::Sender<HermesControl>>,
+) -> Result<Completion> {
     let content_type = response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -191,24 +367,48 @@ pub async fn generate(
         .unwrap_or("");
     let sse = content_type.starts_with("text/event-stream");
     if content_type.starts_with("application/json")
-        && !matches!(
-            provider.kind,
-            ProviderKind::Ollama | ProviderKind::OllamaCloud
-        )
+        && !matches!(kind, ProviderKind::Ollama | ProviderKind::OllamaCloud)
     {
         let body = response.json().await?;
-        let outcome = wire::whole(provider.kind, &body)?;
+        let outcome = wire::whole(kind, &body)?;
         delta(&outcome.text);
         return Ok(outcome);
     }
 
-    let mut parser = wire::Decoder::new(provider.kind);
+    let mut parser = wire::Decoder::new(kind);
+    let mut run_id = None;
     frames(response, sse, |frame| {
         if frame == "[DONE]" {
             parser.finish();
         } else {
-            let value = serde_json::from_str(frame)
+            let value: Value = serde_json::from_str(frame)
                 .context("The provider returned a malformed stream event.")?;
+            if let Some(controls) = controls {
+                let approval = value["event"] == "approval.request";
+                match value["choices"][0]["finish_reason"].as_str() {
+                    Some("cancelled") => bail!("The Hermes server cancelled this turn."),
+                    Some("error") => bail!("The Hermes server reported a failed turn."),
+                    _ => {}
+                }
+                if run_id.is_none()
+                    && let Some(id) = value[if approval { "run_id" } else { "id" }].as_str()
+                {
+                    controls
+                        .try_send(HermesControl::Started(id.to_owned()))
+                        .context("Could not receive the Hermes run ID.")?;
+                    run_id = Some(id.to_owned());
+                }
+                if approval {
+                    ensure!(
+                        value["run_id"].as_str() == run_id.as_deref(),
+                        "Hermes reported an approval for a different run."
+                    );
+                    controls
+                        .try_send(HermesControl::Approval(value))
+                        .context("Too many pending Hermes approvals.")?;
+                    return Ok(false);
+                }
+            }
             parser.event(&value, &mut delta)?;
         }
         Ok(parser.finished())

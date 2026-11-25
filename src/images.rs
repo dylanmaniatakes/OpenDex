@@ -12,6 +12,10 @@ use serde_json::json;
 use std::{io::Write as _, path::Path, time::Duration};
 use uuid::Uuid;
 
+pub mod comfy;
+mod sources;
+pub use sources::{Source, SourceKind, generate_source};
+
 const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ENCODED_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 const MAX_JSON_BYTES: usize = MAX_ENCODED_BYTES + 64 * 1024;
@@ -74,6 +78,7 @@ impl Config {
             .into_iter()
             .find(|item| {
                 item.id == self.provider
+                    && !item.hermes_remote_approvals
                     && matches!(
                         item.kind,
                         ProviderKind::OpenAi | ProviderKind::OpenAiCompatible
@@ -150,6 +155,10 @@ pub async fn generate(
         );
         limited_body(response, MAX_IMAGE_BYTES).await?
     };
+    attachment(bytes)
+}
+
+fn attachment(bytes: Vec<u8>) -> Result<Attachment> {
     let mime = raster_mime(&bytes)
         .context("The endpoint did not return a PNG, JPEG, WebP, or GIF image.")?;
     let extension = match mime {
@@ -160,7 +169,7 @@ pub async fn generate(
     };
     Ok(Attachment {
         name: format!("OpenDex-{}.{}", Uuid::new_v4().simple(), extension),
-        text: STANDARD.encode(bytes),
+        text: STANDARD.encode(bytes).into(),
         media_type: Some(mime.into()),
     })
 }

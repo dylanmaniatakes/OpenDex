@@ -4,6 +4,7 @@ use opendex::{
         AnthropicAuth, McpScope, Message, Project, Provider, ProviderKind, Role, Rule, Store,
         Thread, read_secret, write_secret,
     },
+    voice,
     web::Config,
 };
 use serde_json::json;
@@ -80,6 +81,8 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     let project_id = Uuid::new_v4();
     let thread_id = Uuid::new_v4();
     let server_id = Uuid::new_v4();
+    let voice_id = Uuid::new_v4();
+    let image_id = Uuid::new_v4();
     source
         .change(|data| {
             data.providers[0].name = "Backup endpoint".into();
@@ -94,6 +97,33 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
                 quality: Some("medium".into()),
                 request_base64: false,
             });
+            let mut image: images::Source = serde_json::from_value(json!({
+                "id": image_id, "name": "Image source fixture", "kind": "custom",
+                "endpoint": "https://image.example.org/generate",
+                "options": {"input": "{{prompt}}"},
+                "output_pointer": "/output/image"
+            }))?;
+            image.validate()?;
+            image.secret_ref = Some(Uuid::new_v4());
+            image.has_secret = true;
+            write_secret(image.credential_id(), &image.endpoint, "fixture-image-key")?;
+            data.image_sources.push(image);
+            data.image_source_default = Some(image_id);
+            let voice = voice::Profile {
+                id: voice_id,
+                name: "Speech fixture".into(),
+                kind: voice::Kind::OpenAiCompatible,
+                endpoint: "https://speech.example.org/v1/audio/speech".into(),
+                model: "speech-model".into(),
+                voice: "fixture-voice".into(),
+                key_header: "x-speech-key".into(),
+                has_secret: true,
+                secret_ref: Some(Uuid::new_v4()),
+            };
+            write_secret(voice.credential_id(), &voice.endpoint, "fixture-speech-key")?;
+            data.voice.profiles.push(voice);
+            data.voice.selected = Some(voice_id);
+            data.voice.autoplay = true;
             data.providers.push(Provider {
                 name: "Login metadata".into(),
                 kind: ProviderKind::ChatGptAccount,
@@ -177,6 +207,8 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
         "fixture-access",
         "fixture-refresh",
         "fixture-mcp-key",
+        "fixture-speech-key",
+        "fixture-image-key",
         "chatgpt-access-fixture",
         "chatgpt-refresh-fixture",
     ] {
@@ -197,8 +229,15 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     let (archive, checksum) = backup::open(&path, passphrase.into(), None).unwrap();
     let mut legacy = serde_json::to_value(&archive).unwrap();
     legacy.as_object_mut().unwrap().remove("chatgpt_session");
+    legacy.as_object_mut().unwrap().remove("voice");
+    legacy.as_object_mut().unwrap().remove("image_sources");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("image_source_default");
     let legacy: backup::Archive = serde_json::from_value(legacy).unwrap();
     assert!(!legacy.preview(checksum).has_chatgpt_session);
+    assert!(legacy.preview(checksum).voice_profiles.is_none());
     let preview = archive.preview(checksum);
     assert_eq!(
         preview.providers,
@@ -209,6 +248,11 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
     assert_eq!(preview.mcp_servers, ["MCP fixture"]);
     assert_eq!(preview.web_search, Some("SearXNG"));
     assert_eq!(preview.image_model.as_deref(), Some("image-fixture"));
+    assert_eq!(
+        preview.image_sources,
+        Some(vec!["Image source fixture".into()])
+    );
+    assert_eq!(preview.voice_profiles, Some(vec!["Speech fixture".into()]));
     assert!(!preview.projects[0].available);
     assert!(destination.snapshot().instructions.is_empty());
     let failing = Store::open(&folder.path().join("failing")).unwrap();
@@ -299,6 +343,44 @@ fn encrypted_settings_require_authentication_and_restore_without_replacing_chats
         source.snapshot().image_generation
     );
     assert_eq!(restored.permissions.web, Rule::Allow);
+    let restored_image = &restored.image_sources[0];
+    assert_eq!(restored.image_source_default, Some(image_id));
+    assert_eq!(restored_image.config().provider, image_id);
+    assert_eq!(restored_image.options["input"], "{{prompt}}");
+    assert_eq!(
+        restored_image.secret().unwrap().as_deref(),
+        Some("fixture-image-key")
+    );
+    let restored_voice = restored.voice.profile(voice_id).unwrap();
+    assert_eq!(restored.voice.selected, Some(voice_id));
+    assert!(restored.voice.autoplay);
+    assert_eq!(restored_voice.key_header, "x-speech-key");
+    assert_ne!(
+        restored_voice.credential_id(),
+        source
+            .snapshot()
+            .voice
+            .profile(voice_id)
+            .unwrap()
+            .credential_id()
+    );
+    assert_eq!(
+        restored_voice.secret().unwrap().as_deref(),
+        Some("fixture-speech-key")
+    );
+    drop(destination);
+    let reopened = Store::open(&folder.path().join("destination")).unwrap();
+    assert_eq!(
+        reopened
+            .snapshot()
+            .voice
+            .profile(voice_id)
+            .unwrap()
+            .secret()
+            .unwrap()
+            .as_deref(),
+        Some("fixture-speech-key")
+    );
     assert_eq!(restored.instructions, "Archive fixture instructions");
 
     *ciphertext.last_mut().unwrap() ^= 1;

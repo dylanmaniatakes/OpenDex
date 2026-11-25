@@ -3,6 +3,8 @@ import { matchesHistory } from './history-search.js';
 import { icon } from './icons.js';
 import { mcpContextPicker } from './mcp-context.js';
 import { settingsPanel, permissionName } from './settings.js';
+import { replyPlaybackProfile, speechPlayer } from './voice.js';
+import { dictationRecorder } from './dictation.js';
 
 const tauri = window.__TAURI__;
 const invoke = (command, args = {}) => tauri.core.invoke(command, args);
@@ -32,7 +34,7 @@ let navQueue = Promise.resolve();
 const current = () => data?.threads.find((thread) => thread.id === active);
 const live = () => turns.get(active);
 const draftOf = (id = active) => {
-  if (!drafts.has(id)) drafts.set(id, { text: '', attachments: [], resources: [] });
+  if (!drafts.has(id)) drafts.set(id, { text: '', attachments: [], resources: [], voiceInput: false });
   return drafts.get(id);
 };
 
@@ -77,8 +79,11 @@ function previewAppearance(appearance) {
 }
 
 async function refresh() {
-  data = await invoke('snapshot');
+  const next = await invoke('snapshot');
+  if (JSON.stringify(data?.voice) !== JSON.stringify(next.voice)) speech.stop();
+  data = next;
   if (!current()) active = data.active_thread ?? data.threads.at(-1)?.id;
+  if (current()) mode = current().mode;
   previewAppearance(data.appearance);
   render();
 }
@@ -92,7 +97,54 @@ async function savePreferences(changes) {
   await refresh();
 }
 
-const settings = settingsPanel({ data: () => data, invoke, io, refresh, savePreferences, previewAppearance, toast, copy, confirm });
+const speech = speechPlayer(invoke, () => {
+  voiceControls();
+  if (data) timeline(current());
+}, toast);
+const dictation = dictationRecorder(invoke, () => {
+  if (data) composer(current());
+}, async (id, text) => {
+  const thread = data.threads.find((thread) => thread.id === id);
+  if (!thread) return;
+  const draft = draftOf(id);
+  const separator = draft.text && !/\s$/.test(draft.text) ? ' ' : '';
+  draft.text += separator + text;
+  draft.voiceInput = true;
+  if (id === active) {
+    $('prompt').value = draft.text;
+    await submitDraft(thread);
+  }
+}, toast);
+const settings = settingsPanel({
+  data: () => data, invoke, io, refresh, savePreferences, previewAppearance, toast, copy, confirm,
+  stopSpeech: speech.stop,
+  previewVoice: (profile) => {
+    const job = speech.current();
+    if (job?.profile === profile && !job.source && job.blocked) speech.toggle();
+    else speech.start(profile);
+  },
+});
+
+function voiceControls() {
+  const control = $('voice-playback');
+  const job = speech.current();
+  const action = job ? (job.blocked ? 'Play voice' : 'Stop voice') : 'Voice settings';
+  const label = data?.voice?.profiles.find((profile) => profile.id === data.voice.selected)?.name;
+  control.replaceChildren(icon(job ? (job.blocked ? 'play' : 'stop') : 'speaker', 17));
+  control.title = !job && label ? action + ' · ' + label : action;
+  control.setAttribute('aria-label', action);
+}
+
+function speakReply(thread, message) {
+  const job = speech.current();
+  if (job?.source?.thread === thread.id && job.source.message === message.id) {
+    speech.toggle();
+  } else if (data.voice?.selected) {
+    speech.start(data.voice.selected, { thread: thread.id, message: message.id });
+  } else {
+    settings.open('voice');
+  }
+}
 
 function showDetails(title, content) {
   $('details-title').textContent = title;
@@ -205,7 +257,7 @@ function modeDropdown() {
       showModeOptions(dropdown, false);
       queueNavigation(async () => {
         if (mode === key) return;
-        const target = data.threads.find((thread) => thread.id === lastThreadByMode.get(key))
+        const target = data.threads.find((thread) => thread.mode === key && thread.id === lastThreadByMode.get(key))
           ?? data.threads.findLast((thread) => thread.mode === key);
         if (target) await openThread(target.id);
         else await makeThread(key, null);
@@ -350,13 +402,23 @@ function threadMenu(thread) {
     scope = value;
     serverList.hidden = scope === 'all';
   }, { disabled: busy });
+  const codeProject = thread.mode === 'chat' ? options(
+    [['', 'Ask for a folder'], ...data.projects.map((project) => [project.id, project.name]), ['off', 'Off']],
+    thread.code_handoff_disabled ? 'off' : thread.code_project_id ?? '', undefined, { disabled: busy },
+  ) : null;
   const form = el('form', { class: 'details-form', onsubmit: transient(async (event) => {
     event.preventDefault();
     const mcp_scope = scope === 'all' ? { mode: 'all' } : { mode: 'selected', servers: [...selected] };
-    updateThread(await invoke('edit_thread', { id, changes: { title: title.value, instructions: instructions.value, mcp_scope } }));
+    const changes = { title: title.value, instructions: instructions.value, mcp_scope };
+    if (codeProject) {
+      const disabled = codeProject.value === 'off';
+      changes.code_project = { project: disabled ? null : codeProject.value || null, disabled };
+    }
+    updateThread(await invoke('edit_thread', { id, changes }));
     $('details').close();
   }) }, field('Title', title),
   field('Thread instructions', instructions),
+  codeProject && field('Code Agent handoff project', codeProject, 'Use this folder when the model requests local project work.'),
   field('MCP servers', serverScope),
   serverList,
   el('div', { class: 'form-actions' }, el('button', { type: 'submit', class: 'button primary', disabled: busy }, 'Save conversation'),
@@ -425,7 +487,9 @@ function modelPicker(thread) {
   const empty = !provider || !provider.models.length;
   $('composer-footer').replaceChildren(
     ...empty ? [button(provider ? 'Manage models' : 'Add a provider', () => settings.open('providers', provider?.id), { style: 'text-link' })]
-      : [el('span', {}, 'Enter to send'), el('span', { class: 'footer-dot' }),
+      : [provider?.local_execution && el('span', { title: provider.local_execution.model }, 'Local tools'),
+        provider?.local_execution && el('span', { class: 'footer-dot' }),
+        el('span', {}, 'Enter to send'), el('span', { class: 'footer-dot' }),
         el('span', {}, 'Shift + Enter for a new line')]);
 }
 
@@ -514,6 +578,8 @@ function messageActions(thread, message, lastVisible) {
   const canReply = user && thread.parent_thread && thread.messages.at(-1)?.id === message.id;
   const action = (label, glyph, handler) => button(label, handler, { glyph, onlyIcon: true, style: 'icon-button small' });
   const branch = () => queueNavigation(() => branchConversation(thread, message, { kind: 'continue' }));
+  const job = speech.current();
+  const speaking = job?.source?.thread === thread.id && job.source.message === message.id;
   if (message.image_generation) {
     return el('div', { class: 'message-actions' },
       user && action('Generate image again', 'refresh', () => imagePrompt(thread, message.text, message.image_generation)),
@@ -522,6 +588,10 @@ function messageActions(thread, message, lastVisible) {
   return el('div', { class: 'message-actions' },
     user && thread.mode === 'chat' && action('Edit message', 'edit', () => editMessage(thread, message)),
     !user && action('Copy response', 'copy', () => copy(message.text)),
+    !user && message.text.trim() && action(
+      speaking ? (job.blocked ? 'Play voice' : 'Stop voice') : 'Read aloud',
+      speaking ? (job.blocked ? 'play' : 'stop') : 'speaker',
+      () => speakReply(thread, message)),
     thread.mode === 'chat' && (!user || lastVisible) && (canReply
       ? action('Generate reply', 'refresh', transient(() => replyToBranch(thread)))
       : action('Retry reply', 'refresh', () => queueNavigation(() => branchConversation(thread, message, { kind: 'retry' })))),
@@ -560,16 +630,19 @@ function messageCard(thread, message, lastVisible) {
   if (!message.text && !message.attachments?.length && !message.resources?.length) return null;
   const body = user ? el('div', { class: 'user-text' }, message.text) : markdown(message.text, copy);
   const imageOutput = !user && message.image_generation;
+  const imageSource = imageOutput && (data.image_sources?.find((item) => item.id === message.provider)?.name
+    ?? data.providers.find((item) => item.id === message.provider)?.name);
   const meta = user ? null : el('div', { class: 'assistant-meta' },
     el('span', { class: 'brand-symbol tiny', 'aria-hidden': 'true' }),
-    el('span', {}, message.model ?? 'Assistant'),
+    el('span', {}, imageSource && imageSource !== message.model
+      ? [imageSource, message.model].filter(Boolean).join(' · ') : message.model ?? 'Assistant'),
     message.incomplete && el('span', { class: 'muted' }, '· Partial response'));
   return el('article', { class: 'message ' + (user ? 'user' : 'assistant') }, meta,
     el('div', { class: 'message-content' }, body,
       message.attachments?.length > 0 && el('div', { class: 'message-attachments' },
         message.attachments.map((file) => el('div', {},
           !imageOutput && el('div', { class: 'chip file-chip' }, icon('note', 15), file.name),
-          file.media_type?.startsWith('image/') && el('img', {
+          file.text && file.media_type?.startsWith('image/') && el('img', {
             class: 'preview-image' + (imageOutput ? ' generated-image' : ''), src: 'data:' + file.media_type + ';base64,' + file.text,
             alt: imageOutput ? 'Generated image' : file.name, loading: 'lazy',
           }),
@@ -592,50 +665,62 @@ async function saveImage(thread, message, file) {
 
 function imagePrompt(thread, text, preferred = data.image_generation) {
   if (!thread || turns.has(thread.id)) return;
-  const connections = data.providers.filter((provider) => ['open_ai', 'open_ai_compatible'].includes(provider.kind));
+  const connections = [
+    ...(data.image_sources ?? []).filter((source) => source.kind !== 'comfy_ui' || Object.keys(source.options ?? {}).length)
+      .map((source) => ({ ...source, saved: true })),
+    ...data.providers.filter((provider) => ['open_ai', 'open_ai_compatible'].includes(provider.kind)
+      && !provider.hermes_remote_approvals),
+  ];
+  const manage = () => { $('details').close(); settings.open('images'); };
   if (!connections.length) {
     showDetails('Generate image', el('div', { class: 'details-form' },
-      el('p', { class: 'muted' }, 'Add an OpenAI API or OpenAI-compatible connection with an image generation endpoint.'),
-      button('Open provider settings', () => { $('details').close(); settings.open('providers'); }, { glyph: 'settings' })));
+      el('p', { class: 'muted' }, 'Add an image source in Settings.'),
+      button('Image settings', manage, { glyph: 'settings' })));
     return;
   }
   const initial = connections.find((item) => item.id === preferred?.provider)
     ?? connections.find((item) => item.id === thread.provider_id) ?? connections[0];
   const prompt = el('textarea', { rows: 6, required: true, maxlength: 32000 }, text);
-  const model = el('input', { type: 'text', required: true, maxlength: 300, spellcheck: 'false', value: preferred?.model ?? '' });
+  const model = el('input', { type: 'text', required: !initial.saved, maxlength: 300, spellcheck: 'false',
+    value: initial.saved ? '' : preferred?.provider === initial.id ? preferred.model : '' });
   const size = el('input', { type: 'text', value: preferred?.size ?? '', placeholder: 'Provider default', maxlength: 20 });
   const quality = options([['', 'Provider default'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'],
     ['xhigh', 'Extra high'], ['max', 'Maximum'], ['standard', 'Standard'], ['hd', 'HD']], preferred?.quality === 'auto' ? '' : preferred?.quality);
   let requestBase64 = preferred?.request_base64 ?? false;
-  const compatibility = el('div', { hidden: initial.kind !== 'open_ai_compatible' },
+  const compatibility = el('div', { hidden: initial.saved || initial.kind !== 'open_ai_compatible' },
     check('Request Base64 output', requestBase64, (value) => { requestBase64 = value; }));
-  const connectionAddress = el('span', { class: 'field-note' }, initial.endpoint);
+  const fields = el('div', { class: 'form-grid', hidden: initial.saved }, field('Image model ID', model),
+    field('Size', size, 'Enter dimensions such as 1024x1024.'), field('Quality', quality));
+  const connectionAddress = el('span', { class: 'field-note' },
+    initial.saved ? initial.model || 'Saved source settings' : initial.endpoint);
   const provider = options(connections.map((item) => [item.id, item.name]), initial.id, (id) => {
     const connection = connections.find((item) => item.id === id);
-    compatibility.hidden = connection.kind !== 'open_ai_compatible';
-    connectionAddress.textContent = connection.endpoint;
+    compatibility.hidden = connection.saved || connection.kind !== 'open_ai_compatible';
+    model.required = !connection.saved;
+    fields.hidden = Boolean(connection.saved);
+    connectionAddress.textContent = connection.saved ? connection.model || 'Saved source settings' : connection.endpoint;
   });
   const submit = el('button', { type: 'submit', class: 'button primary' }, icon('image', 16), 'Generate');
   const form = el('form', { class: 'details-form', onsubmit: transient(async (event) => {
     event.preventDefault();
     if (turns.has(thread.id) || data.threads.every((item) => item.id !== thread.id)) return;
-    const config = { provider: provider.value, model: model.value, size: size.value || null,
-      quality: quality.value || null, request_base64: !compatibility.hidden && requestBase64 };
+    const selected = connections.find((item) => item.id === provider.value);
+    const config = { provider: selected.id, model: selected.saved ? selected.model || selected.name : model.value,
+      size: selected.saved ? null : size.value || null,
+      quality: selected.saved ? null : quality.value || null, request_base64: !compatibility.hidden && requestBase64 };
     const draft = draftOf(thread.id);
     const pending = { text: prompt.value, config };
     draft.pendingImage = pending;
     $('details').close();
-    const saved = await generateReply(thread, 'generate_image', { prompt: { thread: thread.id, ...pending } }, undefined, 'Generating image…');
+    const saved = await generateReply(thread, 'generate_image', { prompt: { thread: thread.id, ...pending } }, { notice: 'Generating image…' });
     if (saved && draft.pendingImage === pending) delete draft.pendingImage;
   }) },
   field('Image prompt', prompt),
-  el('div', { class: 'form-grid' },
-    el('div', {}, field('Image provider', provider), connectionAddress),
-    field('Image model ID', model),
-    field('Size', size, 'Enter dimensions such as 1024x1024.'),
-    field('Quality', quality)),
+  el('div', {}, field('Image source', provider), connectionAddress),
+  fields,
   compatibility,
-  el('div', { class: 'form-actions right' }, button('Cancel', () => $('details').close()), submit));
+  el('div', { class: 'form-actions right' }, button('Manage image sources', manage, { glyph: 'settings' }),
+    button('Cancel', () => $('details').close()), submit));
   showDetails('Generate image', form);
   prompt.focus();
 }
@@ -687,10 +772,24 @@ function status() {
   const turn = live();
   const node = $('run-status');
   node.replaceChildren();
+  const recording = dictation.current();
   if (turn?.approval) node.append(renderApproval(turn.approval));
   else if (turn) node.append(el('div', { class: 'live-status' }, el('span', { class: 'pulse' }),
     turn.notice || (turn.stream ? 'Generating' : 'Waiting for the model')));
-  else if (drafts.get(active)?.error) node.append(el('p', { class: 'status-error' }, drafts.get(active).error));
+  else if (recording && recording.thread === active) node.append(el('div', { class: 'live-status' },
+    recording.stage === 'recording' && el('span', { class: 'pulse' }),
+    { starting: 'Starting microphone…', recording: 'Recording…', transcribing: 'Transcribing…' }[recording.stage],
+    recording.stage === 'recording' && button('Cancel recording', dictation.cancel, { style: 'button quiet' })));
+  else if (drafts.get(active)?.error) {
+    const error = drafts.get(active).error;
+    node.append(el('p', { class: 'status-error' }, error));
+    if (error.startsWith('This is the Hermes Agent API.') || error.startsWith('Could not verify Hermes command approval support.')
+      || error.startsWith('This endpoint does not advertise Hermes command approvals.') || error.startsWith('Local execution model unavailable.')
+      || error.includes('Choose a local execution model for this connection')) {
+      node.append(button('Provider settings', () => settings.open('providers', current()?.provider_id),
+        { style: 'text-link' }));
+    }
+  }
   else if (drafts.get(active)?.notice) node.append(el('p', { class: 'live-status' }, drafts.get(active).notice));
 }
 
@@ -797,13 +896,22 @@ function composer(thread) {
   $('attach').disabled = busy || !thread || draft.loadingFiles;
   $('mcp-context').disabled = busy || !thread;
   $('generate-image').disabled = busy || !thread;
+  const recording = dictation.current();
+  const microphone = $('dictation');
+  const recordingHere = recording?.thread === thread?.id && recording?.stage === 'recording';
+  const micLabel = recordingHere ? 'Stop and send voice message' : 'Start voice message';
+  microphone.replaceChildren(icon(recordingHere ? 'stop' : 'mic', 17));
+  microphone.title = micLabel;
+  microphone.setAttribute('aria-label', micLabel);
+  microphone.setAttribute('aria-pressed', String(recordingHere));
+  microphone.disabled = busy || !thread || (!recordingHere && (Boolean(recording) || draft.loadingFiles));
   const webSearch = $('web-search');
   webSearch.disabled = busy || !thread;
   webSearch.setAttribute('aria-pressed', String(Boolean(thread?.web_enabled && data.web_search && !webDenied())));
   $('send').replaceChildren(icon(busy ? 'stop' : 'send', 21));
   $('send').title = busy ? 'Stop response' : 'Send message';
   $('send').setAttribute('aria-label', $('send').title);
-  $('send').disabled = !thread || draft.loadingFiles;
+  $('send').disabled = !thread || draft.loadingFiles || recording?.thread === thread.id;
   renderAttachments();
   modelPicker(thread);
   status();
@@ -812,11 +920,13 @@ function composer(thread) {
 function render() {
   if (!data) return;
   const thread = current();
+  dictation.keepThread(thread?.id);
   navigation();
   toolbar(thread);
   welcome(thread);
   timeline(thread);
   composer(thread);
+  voiceControls();
 }
 
 function hasSelectedModel(thread) {
@@ -830,15 +940,19 @@ function hasSelectedModel(thread) {
   return false;
 }
 
-async function generateReply(thread, command, args, restoreDraft, notice = '') {
+async function generateReply(thread, command, args, { restoreDraft, notice = '', voiceInput = false } = {}) {
   if (turns.has(thread.id)) return;
+  const previousMessage = thread.messages.at(-1)?.id;
   const draft = draftOf(thread.id);
   draft.error = null;
   draft.notice = null;
   turns.set(thread.id, { stream: '', notice, approval: null, accepted: false });
   render();
+  let completed = false;
   try {
-    return await invoke(command, args);
+    const result = await invoke(command, args);
+    completed = true;
+    return result;
   } catch (error) {
     draft.error = String(error);
     if (!turns.get(thread.id)?.accepted) restoreDraft?.();
@@ -847,7 +961,18 @@ async function generateReply(thread, command, args, restoreDraft, notice = '') {
     turns.delete(thread.id);
     unreadApprovals.delete(thread.id);
     await refresh();
-    if (thread.id === active) { $('prompt').focus(); scrollDown(true); }
+    if (thread.id === active) {
+      if (!$('settings').open && !$('details').open) $('prompt').focus();
+      scrollDown(true);
+      const latest = current()?.messages.at(-1);
+      if (completed && latest?.id !== previousMessage && !draft.notice) {
+        const profile = replyPlaybackProfile(data.voice, voiceInput, latest);
+        if (profile) speech.start(profile, { thread: thread.id, message: latest.id });
+        else if (voiceInput && !data.voice?.selected && latest?.role === 'assistant' && latest.text.trim()) {
+          toast('Choose an active voice in Settings → Voice to hear spoken replies.');
+        }
+      }
+    }
   }
 }
 
@@ -863,19 +988,29 @@ async function send(event) {
   const thread = current();
   if (!thread) return;
   if (live()) { await invoke('stop_turn', { id: thread.id }); return; }
-  const draft = draftOf();
+  await submitDraft(thread);
+}
+
+async function submitDraft(thread) {
+  if (turns.has(thread.id)) return;
+  if (dictation.current()?.thread === thread.id) return;
+  const draft = draftOf(thread.id);
   if (draft.loadingFiles || (!draft.text.trim() && !draft.attachments.length && !draft.resources.length)) return;
   if (!hasSelectedModel(thread)) return;
-  const submitted = { text: draft.text, attachments: draft.attachments, resources: draft.resources };
+  const submitted = { text: draft.text, attachments: draft.attachments, resources: draft.resources, voiceInput: draft.voiceInput };
   draft.text = '';
   draft.attachments = [];
   draft.resources = [];
+  draft.voiceInput = false;
   $('prompt').value = '';
   await generateReply(thread, 'send_message', {
     prompt: { thread: thread.id, text: submitted.text, attachments: submitted.attachments.map((file) => file.path), resources: submitted.resources },
-  }, () => {
-    Object.assign(draft, submitted);
-    if (thread.id === active) $('prompt').value = draft.text;
+  }, {
+    voiceInput: submitted.voiceInput,
+    restoreDraft: () => {
+      Object.assign(draft, submitted);
+      if (thread.id === active) $('prompt').value = draft.text;
+    },
   });
 }
 
@@ -903,6 +1038,20 @@ function onTurn({ thread: id, kind, details }) {
       if (!thread.messages.some((message) => message.id === details.message.id)) thread.messages.push(details.message);
       if (id === active) timeline(thread);
       break;
+    case 'code_handoff': {
+      const { thread: updated, project } = details;
+      turn.stream = '';
+      turn.notice = 'Continuing in Code Agent…';
+      if (!data.projects.some((item) => item.id === project.id)) data.projects.push(project);
+      if (lastThreadByMode.get('chat') === id) lastThreadByMode.delete('chat');
+      if (id === active) {
+        mode = updated.mode;
+        lastThreadByMode.set(mode, id);
+        collapsedProjects.delete(project.id);
+      }
+      updateThread(updated);
+      break;
+    }
     case 'stopped':
       draftOf(id).notice = 'Turn stopped.';
       break;
@@ -942,6 +1091,24 @@ function bind() {
   $('mcp-context').replaceChildren(icon('plug', 17));
   $('mcp-context').addEventListener('click', openMcpContext);
   $('web-search').replaceChildren(icon('search', 17));
+  voiceControls();
+  $('voice-playback').addEventListener('click', () => {
+    if (speech.current()) speech.toggle();
+    else settings.open('voice');
+  });
+  $('dictation').addEventListener('click', transient(async () => {
+    const thread = current();
+    if (!thread || live()) return;
+    if (!dictation.current() && (data.dictation?.mode ?? 'off') === 'off') {
+      settings.open('dictation');
+      return;
+    }
+    if (!dictation.current()) {
+      if (!hasSelectedModel(thread) || draftOf(thread.id).loadingFiles) return;
+      speech.stop();
+    }
+    await dictation.toggle(thread.id);
+  }));
   $('generate-image').replaceChildren(icon('image', 17));
   $('generate-image').addEventListener('click', () => {
     const thread = current();
@@ -978,6 +1145,7 @@ function bind() {
   $('prompt').addEventListener('input', (event) => {
     const draft = draftOf();
     draft.text = event.target.value;
+    if (!draft.text.trim()) draft.voiceInput = false;
     if (draft.error || draft.notice) { draft.error = null; draft.notice = null; status(); }
   });
   $('history-search').addEventListener('input', navigation);

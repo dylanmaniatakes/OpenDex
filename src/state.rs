@@ -1,14 +1,14 @@
 //! Persistent app data. Credentials stay in the system credential store.
-use crate::{images, web};
+use crate::{images, transcription, voice, web};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 use uuid::Uuid;
 
@@ -47,6 +47,12 @@ impl ProviderKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalExecutionModel {
+    pub provider: Uuid,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
     pub id: Uuid,
     pub name: String,
@@ -69,6 +75,10 @@ pub struct Provider {
     pub anthropic_auth: AnthropicAuth,
     #[serde(default = "default_claude_path")]
     pub claude_path: String,
+    #[serde(default)]
+    pub hermes_remote_approvals: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_execution: Option<LocalExecutionModel>,
 }
 
 fn default_claude_path() -> String {
@@ -91,7 +101,48 @@ impl Provider {
             ollama_think: None,
             anthropic_auth: AnthropicAuth::Api,
             claude_path: default_claude_path(),
+            hermes_remote_approvals: false,
+            local_execution: None,
         }
+    }
+
+    pub fn is_hermes_agent_model(model: &str) -> bool {
+        model.eq_ignore_ascii_case("hermes-agent")
+    }
+
+    pub fn is_openclaw_agent_model(model: &str) -> bool {
+        let model = model.to_ascii_lowercase();
+        model == "openclaw"
+            || model.starts_with("openclaw/")
+            || model.starts_with("openclaw:")
+            || model.starts_with("agent:")
+    }
+
+    /// A missing or changed pairing is an error, so it cannot become a remote-only run.
+    pub fn execution_model<'a>(
+        &'a self,
+        selected_model: &'a str,
+        providers: &'a [Provider],
+    ) -> Result<(&'a Provider, &'a str)> {
+        let Some(selection) = &self.local_execution else {
+            return Ok((self, selected_model));
+        };
+        let local = providers
+            .iter()
+            .find(|entry| entry.id == selection.provider)
+            .context("Local execution model unavailable. Choose a saved inference model in Provider settings.")?;
+        ensure!(
+            local.id != self.id
+                && local.local_execution.is_none()
+                && !local.hermes_remote_approvals
+                && local.models.contains(&selection.model)
+                && (local.kind != ProviderKind::OpenAiCompatible
+                    || (local.endpoint != self.endpoint
+                        && !Self::is_hermes_agent_model(&selection.model)
+                        && !Self::is_openclaw_agent_model(&selection.model))),
+            "Local execution model unavailable. Choose a separate inference connection and model in Provider settings."
+        );
+        Ok((local, &selection.model))
     }
 
     pub fn credential_id(&self) -> Uuid {
@@ -145,6 +196,22 @@ impl Provider {
             }
         }
         normalize_models(&mut self.models)?;
+        if self.kind != ProviderKind::OpenAiCompatible {
+            self.hermes_remote_approvals = false;
+            self.local_execution = None;
+        }
+        if let Some(selection) = &self.local_execution {
+            ensure!(
+                selection.provider != self.id,
+                "Choose a separate local execution provider."
+            );
+            let mut models = vec![selection.model.clone()];
+            normalize_models(&mut models)?;
+            ensure!(
+                models.first() == Some(&selection.model),
+                "Choose a valid local execution model."
+            );
+        }
         ensure!(self.token_limit != Some(0), "Token limit must be positive.");
         if self.anthropic_auth == AnthropicAuth::Account {
             if self.kind == ProviderKind::Anthropic {
@@ -161,7 +228,7 @@ impl Provider {
     }
 }
 
-fn validate_request_header(name: &str) -> Result<reqwest::header::HeaderName> {
+pub(crate) fn validate_request_header(name: &str) -> Result<reqwest::header::HeaderName> {
     let header = reqwest::header::HeaderName::from_bytes(name.as_bytes())?;
     ensure!(
         !matches!(
@@ -601,7 +668,7 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
     pub name: String,
-    pub text: String,
+    pub text: Arc<str>,
     /// When present, text contains the original bytes encoded in base64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
@@ -732,6 +799,10 @@ pub struct Thread {
     pub workspace: Option<PathBuf>,
     #[serde(default)]
     pub project_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_project_id: Option<Uuid>,
+    #[serde(default)]
+    pub code_handoff_disabled: bool,
     #[serde(default)]
     pub provider_id: Option<Uuid>,
     #[serde(default)]
@@ -822,6 +893,8 @@ impl Thread {
             messages,
             workspace: self.workspace.clone(),
             project_id: self.project_id,
+            code_project_id: self.code_project_id,
+            code_handoff_disabled: self.code_handoff_disabled,
             provider_id: self.provider_id,
             model_id: self.model_id.clone(),
             instructions: self.instructions.clone(),
@@ -841,6 +914,14 @@ pub struct Data {
     pub web_search: Option<web::Config>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_generation: Option<images::Config>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub image_sources: Vec<images::Source>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_source_default: Option<Uuid>,
+    #[serde(skip_serializing_if = "voice::Settings::is_empty")]
+    pub voice: voice::Settings,
+    #[serde(skip_serializing_if = "transcription::Settings::is_default")]
+    pub dictation: transcription::Settings,
     pub threads: Vec<Thread>,
     pub projects: Vec<Project>,
     pub permissions: Permissions,
@@ -857,6 +938,10 @@ impl Default for Data {
             servers: vec![],
             web_search: None,
             image_generation: None,
+            image_sources: vec![],
+            image_source_default: None,
+            voice: voice::Settings::default(),
+            dictation: transcription::Settings::default(),
             threads: vec![],
             projects: vec![],
             permissions: Permissions::default(),
@@ -990,10 +1075,11 @@ impl Store {
     }
 
     pub fn codex_home(&self) -> PathBuf {
-        self.path
-            .parent()
-            .expect("workspace directory")
-            .join("codex")
+        self.data_dir().join("codex")
+    }
+
+    pub(crate) fn data_dir(&self) -> &Path {
+        self.path.parent().expect("workspace directory")
     }
 
     pub fn snapshot(&self) -> Data {
@@ -1016,8 +1102,11 @@ impl Store {
     fn write(path: &Path, data: &Data) -> Result<()> {
         let mut file =
             tempfile::NamedTempFile::new_in(path.parent().context("Missing app data folder.")?)?;
-        serde_json::to_writer(&mut file, data)?;
-        file.flush()?;
+        {
+            let mut writer = BufWriter::new(&mut file);
+            serde_json::to_writer(&mut writer, data)?;
+            writer.flush()?;
+        }
         file.as_file().sync_all()?;
         file.persist(path)?;
         Ok(())

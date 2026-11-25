@@ -8,4 +8,6 @@ pub mod images;
 pub mod mcp;
 pub mod providers;
 pub mod state;
+pub mod transcription;
+pub mod voice;
 pub mod web;

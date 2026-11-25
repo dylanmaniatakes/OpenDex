@@ -5,13 +5,24 @@
 ._*
 .env
 .env.*
+.envrc
 /gen/
 __pycache__/
+
+# Local credentials and private certificates
+*.key
+*.pem
+*.p12
+*.pfx
+id_ed25519
+id_rsa
+credentials.json
 
 # Local OpenDex state and exports
 /.opendex/
 /codex/
 /claude/
+/speech-models/
 workspace.json
 workspace.lock
 application.lock

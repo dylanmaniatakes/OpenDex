@@ -49,11 +49,12 @@ for name, passed in [
     ("bundle identifier matches tauri configuration", identifier_result.returncode == 0 and identifier_result.stdout.strip() == config.get("identifier")),
     ("build profile is release", artifact.get("profile") == "release"),
     ("manifest version matches configuration", artifact.get("version") == config.get("version")),
-    ("manifest commit matches current repository", artifact.get("commit") == current_commit),
+    ("manifest commit matches current repository", current_commit is not None and artifact.get("commit") == current_commit),
     ("manifest executable size matches disk", release_bundle.get("size_bytes") == executable.stat().st_size),
     ("manifest executable hash matches disk", release_bundle.get("executable_sha256") == sha256),
     ("bundle ad-hoc signature verified", codesign_verify.returncode == 0),
     ("manifest signature state", release_bundle.get("signature") == "adhoc"),
+    ("manifest uses a bundle-relative name", release_bundle.get("path") == bundle.name),
     ("bundle host architecture matches host", manifest.get("host", {}).get("arch") == platform.machine()),
     ("build came from a clean repository", manifest.get("artifact", {}).get("dirty") is False),
 ]:

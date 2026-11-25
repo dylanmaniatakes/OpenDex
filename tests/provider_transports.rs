@@ -3,23 +3,61 @@ use opendex::{
     images,
     mcp::Connection,
     providers::{self, Tool},
-    state::{Attachment, Message, Provider, ProviderKind, Role, Server, Transport},
+    state::{
+        Attachment, LocalExecutionModel, Message, Provider, ProviderKind, Role, Server, Transport,
+    },
+    voice,
     web::{self, Action, Config},
 };
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     path::PathBuf,
     thread::JoinHandle,
+    time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 struct Request {
     line: String,
     headers: String,
     body: Value,
+}
+
+fn read_request(stream: &TcpStream) -> Request {
+    let mut read = BufReader::new(stream);
+    let mut line = String::new();
+    read.read_line(&mut line).unwrap();
+    let mut headers = String::new();
+    loop {
+        let mut header = String::new();
+        assert_ne!(read.read_line(&mut header).unwrap(), 0);
+        if header == "\r\n" {
+            break;
+        }
+        headers.push_str(&header.to_lowercase());
+    }
+    let length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length: "))
+        .map_or(0, |length| length.parse::<usize>().unwrap());
+    let mut body = vec![0; length];
+    read.read_exact(&mut body).unwrap();
+    let body = if length == 0 {
+        Value::Null
+    } else if headers.contains("application/x-www-form-urlencoded") {
+        Value::String(String::from_utf8(body).unwrap())
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    Request {
+        line,
+        headers,
+        body,
+    }
 }
 
 struct Fixture {
@@ -37,34 +75,7 @@ impl Fixture {
         let worker = std::thread::spawn(move || {
             for _ in 0..count {
                 let (mut stream, _) = socket.accept().unwrap();
-                let mut read = BufReader::new(&stream);
-                let mut line = String::new();
-                read.read_line(&mut line).unwrap();
-                let mut headers = String::new();
-                loop {
-                    let mut header = String::new();
-                    read.read_line(&mut header).unwrap();
-                    if header == "\r\n" {
-                        break;
-                    }
-                    headers.push_str(&header.to_lowercase());
-                }
-                let length = headers
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length: "))
-                    .map_or(0, |length| length.parse::<usize>().unwrap());
-                let mut body = vec![0; length];
-                read.read_exact(&mut body).unwrap();
-                let body = if length == 0 {
-                    Value::Null
-                } else {
-                    serde_json::from_slice(&body).unwrap()
-                };
-                let (mime, extra, body) = serve(Request {
-                    line,
-                    headers,
-                    body,
-                });
+                let (mime, extra, body) = serve(read_request(&stream));
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nConnection: close\r\n{extra}Content-Length: {}\r\n\r\n", body.len()).unwrap();
                 let split = body.len() / 2;
                 stream.write_all(&body.as_bytes()[..split]).unwrap();
@@ -80,12 +91,488 @@ impl Fixture {
     }
 }
 
+#[tokio::test]
+async fn voice_adapters_send_the_selected_speech_payload_and_decode_audio() {
+    let wav = "RIFF0000WAVEfixture";
+    let fixture = Fixture::new(5, move |request| {
+        match request.line.split_whitespace().nth(1).unwrap() {
+            "/custom/speech" => {
+                assert!(request.headers.contains("x-audio-key: fixture"));
+                assert_eq!(
+                    request.body,
+                    json!({
+                        "model": "speech-model", "voice": "sample-voice", "input": "Hello & world!", "response_format": "mp3"
+                    })
+                );
+                ("audio/mpeg", String::new(), "ID3fixture".into())
+            }
+            "/v1/text-to-speech/sample-voice?output_format=mp3_44100_128" => {
+                assert!(request.headers.contains("xi-api-key: fixture"));
+                assert_eq!(
+                    request.body,
+                    json!({"text": "Hello & world!", "model_id": "speech-model"})
+                );
+                ("audio/mpeg", String::new(), "ID3fixture".into())
+            }
+            "/v2/voices?page_size=100&search=calm" => {
+                assert!(request.headers.contains("xi-api-key: fixture"));
+                (
+                    "application/json",
+                    String::new(),
+                    json!({"voices":[{"voice_id":"demo","name":"Calm"}]}).to_string(),
+                )
+            }
+            "/tts" => {
+                assert_eq!(
+                    request.body,
+                    "text=Hello+%26+world%21&voice_url=sample-voice"
+                );
+                ("audio/wav", String::new(), wav.into())
+            }
+            "/api/audio/speak" => {
+                assert!(request.headers.contains("x-hermes-session-token: fixture"));
+                assert_eq!(request.body, json!({"text": "Hello & world!"}));
+                (
+                    "application/json",
+                    String::new(),
+                    json!({
+                        "data_url": "data:audio/wav;base64,UklGRjAwMDBXQVZFZml4dHVyZQ=="
+                    })
+                    .to_string(),
+                )
+            }
+            url => panic!("Unexpected speech URL {url}"),
+        }
+    });
+    let client = providers::client().unwrap();
+    for (kind, path, header, mime) in [
+        (
+            voice::Kind::OpenAiCompatible,
+            "/custom/speech",
+            "x-audio-key",
+            "audio/mpeg",
+        ),
+        (voice::Kind::ElevenLabs, "/", "xi-api-key", "audio/mpeg"),
+        (voice::Kind::PocketTts, "/tts", "", "audio/wav"),
+        (
+            voice::Kind::Hermes,
+            "/api/audio/speak",
+            "x-hermes-session-token",
+            "audio/wav",
+        ),
+    ] {
+        let profile = voice::Profile {
+            id: Uuid::new_v4(),
+            name: "Voice fixture".into(),
+            kind,
+            endpoint: format!("{}{path}", fixture.endpoint),
+            model: "speech-model".into(),
+            voice: "sample-voice".into(),
+            key_header: header.into(),
+            has_secret: false,
+            secret_ref: None,
+        };
+        let clip = voice::synthesize(&client, &profile, Some("fixture"), " Hello & world! ", 0)
+            .await
+            .unwrap();
+        assert_eq!(clip.mime, mime);
+        assert!(!clip.more);
+        if kind == voice::Kind::ElevenLabs {
+            let found = voice::elevenlabs_voices(&client, &profile, Some("fixture"), "calm")
+                .await
+                .unwrap();
+            assert_eq!((&*found[0].id, &*found[0].name), ("demo", "Calm"));
+        }
+    }
+    fixture.finish();
+}
+
+#[tokio::test]
+async fn new_voice_connections_use_their_server_formats_and_playable_audio() {
+    let mut deepgram_part = 0;
+    let fixture = Fixture::new(7, move |request| {
+        let path = request.line.split_whitespace().nth(1).unwrap();
+        match path {
+            "/" => assert_eq!(request.body, json!({"text": "Voice check."})),
+            "/synthesize" => assert_eq!(
+                request.body,
+                json!({
+                    "text": "Voice check.", "voice": "en_US-lessac-medium", "speaker_id": 2
+                })
+            ),
+            "/omni/v1/audio/speech" => assert_eq!(
+                request.body,
+                json!({
+                    "input": "Voice check.", "model": "omnivoice", "voice": "auto", "response_format": "wav"
+                })
+            ),
+            "/kokoro/v1/audio/speech" => assert_eq!(
+                request.body,
+                json!({
+                    "input": "Voice check.", "model": "kokoro", "voice": "af_heart", "response_format": "mp3"
+                })
+            ),
+            "/tts/bytes" => {
+                assert!(request.headers.contains("authorization: bearer fixture"));
+                assert!(request.headers.contains("cartesia-version: 2026-08-14"));
+                assert_eq!(
+                    request.body,
+                    json!({
+                        "transcript": "Voice check.", "model_id": "sonic-3.6", "voice": "test-voice",
+                        "output_format": {"container": "wav", "encoding": "pcm_s16le", "sample_rate": 24000}
+                    })
+                );
+            }
+            "/v1/speak?model=aura-2-thalia-en&encoding=linear16&container=wav" => {
+                assert!(request.headers.contains("authorization: token fixture"));
+                assert_eq!(
+                    request.body["text"].as_str().unwrap().len(),
+                    if deepgram_part == 0 { 2000 } else { 1 }
+                );
+                deepgram_part += 1;
+            }
+            _ => panic!("Unexpected speech path {path}"),
+        }
+        ("audio/wav", String::new(), "RIFF0000WAVEfixture".into())
+    });
+    let client = providers::client().unwrap();
+    for (kind, path, model, speaker, key) in [
+        (voice::Kind::Piper, "/", "", "", None),
+        (
+            voice::Kind::Piper,
+            "/synthesize",
+            "en_US-lessac-medium",
+            "2",
+            None,
+        ),
+        (
+            voice::Kind::OmniVoice,
+            "/omni/v1/audio/speech",
+            "omnivoice",
+            "auto",
+            None,
+        ),
+        (
+            voice::Kind::Kokoro,
+            "/kokoro/v1/audio/speech",
+            "kokoro",
+            "af_heart",
+            None,
+        ),
+        (
+            voice::Kind::Cartesia,
+            "/tts/bytes",
+            "sonic-3.6",
+            "test-voice",
+            Some("fixture"),
+        ),
+        (
+            voice::Kind::Deepgram,
+            "/v1/speak",
+            "aura-2-thalia-en",
+            "",
+            Some("fixture"),
+        ),
+    ] {
+        let profile = voice::Profile {
+            id: Uuid::new_v4(),
+            name: "Voice fixture".into(),
+            kind,
+            endpoint: format!("{}{path}", fixture.endpoint),
+            model: model.into(),
+            voice: speaker.into(),
+            key_header: String::new(),
+            has_secret: key.is_some(),
+            secret_ref: None,
+        };
+        if kind == voice::Kind::Deepgram {
+            let text = "x".repeat(2001);
+            assert!(
+                voice::synthesize(&client, &profile, key, &text, 0)
+                    .await
+                    .unwrap()
+                    .more
+            );
+            assert!(
+                !voice::synthesize(&client, &profile, key, &text, 1)
+                    .await
+                    .unwrap()
+                    .more
+            );
+        } else {
+            let clip = voice::synthesize(&client, &profile, key, "Voice check.", 0)
+                .await
+                .unwrap();
+            assert_eq!(clip.mime, "audio/wav");
+            assert!(!clip.more);
+        }
+    }
+    fixture.finish();
+}
+
 fn provider(fixture: &Fixture, kind: ProviderKind) -> Provider {
     Provider {
         kind,
         endpoint: format!("{}/api-prefix", fixture.endpoint),
         ..Provider::local()
     }
+}
+
+#[tokio::test]
+async fn image_sources_submit_comfy_workflows_and_read_custom_json_images() {
+    let fixture = Fixture::new(4, |request| {
+        match request.line.split_whitespace().nth(1).unwrap() {
+            "/comfy/prompt" => {
+                assert_eq!(request.body["prompt"]["10"]["inputs"]["text"], "Coast: \"blue\"");
+                assert_eq!(request.body["prompt"]["10"]["class_type"], "CLIPTextEncode");
+                ("application/json", String::new(), json!({"prompt_id":"job-1"}).to_string())
+            }
+            "/comfy/history/job-1" => (
+                "application/json", String::new(),
+                json!({"job-1":{"outputs":{"11":{"images":[{"filename":"fixture.gif","type":"output"}]}}}}).to_string(),
+            ),
+            "/comfy/view?filename=fixture.gif&subfolder=&type=output" =>
+                ("image/gif", String::new(), "GIF89afixture".into()),
+            "/custom" => {
+                assert_eq!(request.body, json!({"input":{"caption":"Coast: \"blue\""},"model":"fixture"}));
+                ("application/json", String::new(), json!({"result":{"image":"/9j/Zml4dHVyZQ=="}}).to_string())
+            }
+            path => panic!("Unexpected image request for {path}"),
+        }
+    });
+    let client = providers::client().unwrap();
+    for (kind, route, options, pointer, mime) in [
+        (
+            "comfy_ui",
+            "/comfy",
+            json!({
+                "10":{"class_type":"CLIPTextEncode","inputs":{"text":"{{prompt}}"}},
+                "11":{"class_type":"SaveImage","inputs":{"images":["10",0]}}
+            }),
+            "",
+            "image/gif",
+        ),
+        (
+            "custom",
+            "/custom",
+            json!({"input":{"caption":"{{prompt}}"},"model":"fixture"}),
+            "/result/image",
+            "image/jpeg",
+        ),
+    ] {
+        let mut source: images::Source = serde_json::from_value(json!({
+            "id": Uuid::new_v4(), "name": "Fixture", "kind": kind,
+            "endpoint": format!("{}{route}", fixture.endpoint), "options": options, "output_pointer": pointer
+        })).unwrap();
+        source.validate().unwrap();
+        let image = images::generate_source(&client, &source, "Coast: \"blue\"")
+            .await
+            .unwrap();
+        assert_eq!(image.media_type.as_deref(), Some(mime));
+    }
+    fixture.finish();
+}
+
+#[tokio::test]
+async fn comfy_library_inspects_nodes_and_saves_a_new_named_graph() {
+    let fixture = Fixture::new(5, |request| {
+        let target = request.line.split_whitespace().nth(1).unwrap();
+        let body = match target {
+            "/comfy/userdata?dir=workflows&recurse=true" => {
+                json!(["nested/existing.json", "../outside.json", "notes.txt"])
+            }
+            "/comfy/userdata/workflows%2Fnested%2Fexisting.json" => json!({"nodes":[],"links":[]}),
+            "/comfy/object_info/CLIPTextEncode" => json!({
+                "CLIPTextEncode":{"input":{"required":{"text":["STRING"]}},"output":["CONDITIONING"]}
+            }),
+            "/comfy/object_info/SaveImage" => json!({
+                "SaveImage":{"input":{"required":{"images":["IMAGE"]}},"output":[]}
+            }),
+            "/comfy/userdata/workflows%2FNew%20Graph.json?overwrite=false" => {
+                assert!(request.line.starts_with("POST "));
+                assert_eq!(request.body["1"]["inputs"]["text"], "{{prompt}}");
+                json!("workflows/New Graph.json")
+            }
+            path => panic!("Unexpected ComfyUI path {path}"),
+        };
+        ("application/json", String::new(), body.to_string())
+    });
+    let mut source: images::Source = serde_json::from_value(json!({
+        "id":Uuid::new_v4(), "name":"Comfy library", "kind":"comfy_ui",
+        "endpoint":format!("{}/comfy", fixture.endpoint)
+    }))
+    .unwrap();
+    source.validate().unwrap();
+    assert!(!source.ready_to_generate());
+    let client = providers::client().unwrap();
+    let library = images::comfy::Library::new(&client, &source).unwrap();
+    assert_eq!(library.workflows().await.unwrap(), ["nested/existing.json"]);
+    let existing = library.read("nested/existing.json").await.unwrap();
+    assert!(images::comfy::api_graph(existing).is_err());
+    assert!(images::comfy::workflow_path("../outside.json").is_err());
+    assert!(images::comfy::workflow_path("%2e%2e/outside.json").is_err());
+    let graph = images::comfy::api_graph(json!({
+        "1":{"class_type":"CLIPTextEncode","inputs":{"text":"{{prompt}}"}},
+        "2":{"class_type":"SaveImage","inputs":{"images":["1",0]}}
+    }))
+    .unwrap();
+    library.validate_new_graph(&graph).await.unwrap();
+    let name = images::comfy::new_workflow_path("New Graph").unwrap();
+    library.save_new(&name, &graph).await.unwrap();
+    fixture.finish();
+}
+
+#[tokio::test]
+async fn agent_gateway_requires_opt_in_and_approval_support_for_remote_hermes() {
+    let fixture = Fixture::new(4, |request| {
+        match request.line.split_whitespace().nth(1).unwrap() {
+            "/api-prefix/capabilities" => (
+                "application/json",
+                String::new(),
+                json!({
+                    "object":"hermes.api_server.capabilities",
+                    "platform":"hermes-agent",
+                    "features": {"approval_events": true, "run_approval_response": true}
+                })
+                .to_string(),
+            ),
+            "/inference/capabilities" => (
+                "application/json",
+                String::new(),
+                json!({"object":"inference.capabilities"}).to_string(),
+            ),
+            path => panic!("Unexpected request for {path}"),
+        }
+    });
+    let client = providers::client().unwrap();
+    let mut provider = provider(&fixture, ProviderKind::OpenAiCompatible);
+    assert!(
+        providers::ensure_client_tool_endpoint(&client, &provider, "hermes-agent")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Hermes Agent API")
+    );
+    assert!(
+        providers::ensure_client_tool_endpoint(&client, &provider, "custom-alias")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Hermes Agent API")
+    );
+    provider.hermes_remote_approvals = true;
+    providers::ensure_client_tool_endpoint(&client, &provider, "hermes-agent")
+        .await
+        .unwrap();
+    provider.endpoint = format!("{}/inference", fixture.endpoint);
+    assert!(
+        providers::ensure_client_tool_endpoint(&client, &provider, "Hermes-4-70B")
+            .await
+            .is_err()
+    );
+    provider.hermes_remote_approvals = false;
+    providers::ensure_client_tool_endpoint(&client, &provider, "Hermes-4-70B")
+        .await
+        .unwrap();
+    fixture.finish();
+}
+
+#[test]
+fn a_paired_model_is_used_for_local_execution_and_does_not_fall_back_to_the_vps() {
+    let mut inference = Provider::local();
+    inference.models.push("local-fixture".into());
+    let agent = Provider {
+        kind: ProviderKind::OpenAiCompatible,
+        hermes_remote_approvals: true,
+        local_execution: Some(LocalExecutionModel {
+            provider: inference.id,
+            model: "local-fixture".into(),
+        }),
+        ..Provider::local()
+    };
+    let providers = [inference];
+    let (selected, model) = agent.execution_model("hermes-agent", &providers).unwrap();
+    assert_eq!(selected.id, providers[0].id);
+    assert_eq!(model, "local-fixture");
+    assert!(agent.execution_model("hermes-agent", &[]).is_err());
+}
+
+#[tokio::test]
+async fn vps_delegation_relays_exact_hermes_approval_decisions() {
+    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+    let provider = Provider {
+        kind: ProviderKind::OpenAiCompatible,
+        endpoint: format!("http://{}/v1", socket.local_addr().unwrap()),
+        hermes_remote_approvals: true,
+        ..Provider::local()
+    };
+    let worker = std::thread::spawn(move || {
+        let read = |expected: &str| {
+            let (stream, _) = socket.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let request = read_request(&stream);
+            assert_eq!(request.line.trim_end(), expected);
+            (stream, request)
+        };
+        let send_json = |mut stream: TcpStream, body: Value| {
+            let body = body.to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        };
+        let (capabilities, _) = read("GET /v1/capabilities HTTP/1.1");
+        send_json(
+            capabilities,
+            json!({"platform":"hermes-agent", "features":{
+                "approval_events":true, "run_approval_response":true, "run_submission":true,
+                "run_events_sse":true, "run_stop":true
+            }}),
+        );
+        let (submission, request) = read("POST /v1/runs HTTP/1.1");
+        assert!(request.headers.contains("idempotency-key: "));
+        assert_eq!(request.body["input"], "Check the host status");
+        assert_eq!(request.body["model"], "hermes-agent");
+        assert_eq!(request.body.as_object().unwrap().len(), 3);
+        send_json(submission, json!({"run_id":"run_fixture"}));
+        let (mut stream, _) = read("GET /v1/runs/run_fixture/events HTTP/1.1");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        for (prompt_id, command, choice) in [("p1", "hostname", "once"), ("p2", "whoami", "deny")] {
+            let event = json!({"event":"approval.request", "run_id":"run_fixture", "prompt_id":prompt_id,
+                "execution_generation":4, "command":command,"choices":["once","deny"]});
+            write!(stream, "event: approval.request\ndata: {event}\n\n").unwrap();
+            let (decision, request) = read("POST /v1/runs/run_fixture/approval HTTP/1.1");
+            assert_eq!(
+                request.body,
+                json!({"request_id":prompt_id,"execution_generation":4,"choice":choice})
+            );
+            send_json(decision, json!({"run_id":"run_fixture", "choice":choice}));
+        }
+        let completed =
+            json!({"event":"run.completed","run_id":"run_fixture","output":"Fixture summary"});
+        write!(stream, "data: {completed}\n\n").unwrap();
+    });
+    let client = providers::client().unwrap();
+    let cancel = CancellationToken::new();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(10),
+        providers::remote::delegate(
+            &client,
+            &provider,
+            "hermes-agent",
+            "Check the host status",
+            &cancel,
+            |approval| async move { approval["command"] == "hostname" },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(outcome.as_deref(), Some("Fixture summary"));
+    worker.join().unwrap();
 }
 
 fn response(events: &[Value]) -> String {
@@ -157,7 +644,7 @@ async fn image_generation_preserves_raster_bytes_and_provider_options() {
         }
         let result = result.unwrap();
         assert_eq!(result.media_type.as_deref(), Some("image/png"));
-        assert_eq!(result.text, PNG);
+        assert_eq!(&*result.text, PNG);
         let path = directory.path().join(result.name.clone());
         images::save(&result, &path).unwrap();
         assert_eq!(

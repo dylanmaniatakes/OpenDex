@@ -38,8 +38,11 @@ import sys
 
 with open("tauri.conf.json") as config_file:
     config = json.load(config_file)
+with open(config["bundle"]["macOS"]["infoPlist"], "rb") as plist:
+    app_info = plistlib.load(plist)
 with open(sys.argv[1], "wb") as plist:
     plistlib.dump({
+        **app_info,
         "CFBundleName": config["productName"],
         "CFBundleDisplayName": config["productName"],
         "CFBundleExecutable": "opendex",

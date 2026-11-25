@@ -1,6 +1,9 @@
 import { $, button, check, el, field, lines, options, uuid } from './dom.js';
 import { backupForms } from './backup-settings.js';
 import { icon } from './icons.js';
+import { voiceSettings } from './voice.js';
+import { imageSettings } from './image-settings.js';
+import { dictationSettings } from './dictation.js';
 
 const adapters = {
   ollama: ['Ollama Local', 'http://127.0.0.1:11434/api'],
@@ -14,7 +17,7 @@ const adapters = {
 
 const sections = [
   ['providers', 'Providers', 'server'], ['mcp', 'MCP Servers', 'plug'],
-  ['web', 'Web search', 'search'],
+  ['web', 'Web search', 'search'], ['voice', 'Voice', 'speaker'], ['dictation', 'Dictation', 'mic'], ['images', 'Images', 'image'],
   ['permissions', 'Permissions', 'shield'], ['appearance', 'Appearance', 'palette'],
   ['instructions', 'Instructions', 'note'],
   ['backups', 'Backups', 'shield'],
@@ -70,6 +73,9 @@ export function settingsPanel(api) {
   let accountBusy = false;
   let authUrl;
   let catalogSearch = '';
+  const voice = voiceSettings(api, heading, formSection, render, run);
+  const images = imageSettings(api, heading, formSection, render, run);
+  const dictation = dictationSettings(api, heading, formSection, render, run);
 
   function open(section = 'providers', id = null) {
     if (section === 'providers' && id) selectedProvider = id;
@@ -83,7 +89,7 @@ export function settingsPanel(api) {
       button(label, () => { tab = key; render(); }, {
         glyph, style: 'settings-tab' + (tab === key ? ' current' : ''),
       })));
-    const page = { providers, mcp, web, permissions, appearance, instructions, backups }[tab]();
+    const page = { providers, mcp, web, voice, dictation, images, permissions, appearance, instructions, backups }[tab]();
     $('settings-content').replaceChildren(page);
   }
 
@@ -136,6 +142,18 @@ export function settingsPanel(api) {
     const headers = textarea(provider.headers.map(([name, variable]) => name + '=' + variable).join('\n'),
       { rows: 2, spellcheck: 'false', placeholder: 'X-Organization=MY_ORG' });
     let forget = false;
+    let hermesApprovals = Boolean(provider.hermes_remote_approvals);
+    let localExecution = provider.local_execution ?? null;
+    const executionValue = (selection) => selection ? JSON.stringify([selection.provider, selection.model]) : '';
+    const localModels = api.data().providers.filter((candidate) => candidate.id !== provider.id
+      && !candidate.hermes_remote_approvals && !candidate.local_execution
+      && (candidate.kind !== 'open_ai_compatible' || candidate.endpoint !== provider.endpoint))
+      .flatMap((candidate) => candidate.models.filter((model) => candidate.kind !== 'open_ai_compatible'
+        || !/^(hermes-agent$|openclaw(?:$|[/:])|agent:)/i.test(model))
+        .map((model) => [executionValue({ provider: candidate.id, model }), `${candidate.name} · ${model}`]));
+    if (localExecution && !localModels.some(([value]) => value === executionValue(localExecution))) {
+      localModels.unshift([executionValue(localExecution), `Unavailable · ${localExecution.model}`]);
+    }
     const status = el('div', { class: 'form-status', role: 'status' });
     const isAccount = provider.kind === 'chat_gpt_account';
     const anthropic = provider.kind === 'anthropic';
@@ -155,8 +173,17 @@ export function settingsPanel(api) {
         return;
       }
       connectionFields.append(
-        field('Base URL', endpoint, 'Include the API prefix, such as /v1 or /api.'),
+        field('Base URL', endpoint, provider.kind === 'open_ai_compatible'
+          ? 'Include the API prefix, such as /v1.'
+          : 'Include the API prefix, such as /v1 or /api.'),
         field('API key', secret, provider.has_secret ? 'Leave blank to keep the key for this endpoint.' : 'Optional for endpoints that accept unauthenticated requests.'),
+        provider.kind === 'open_ai_compatible' && el('div', { class: 'wide' },
+          field('Local execution model', options([['', 'Use this connection directly'], ...localModels], executionValue(localExecution), (value) => {
+            const [provider, model] = value ? JSON.parse(value) : [];
+            localExecution = value ? { provider, model } : null;
+          }), 'For a server agent such as Hermes, pair a saved inference model so OpenDex can run workspace tools on this computer.'),
+          check('Allow Hermes VPS tasks and relay command approvals', hermesApprovals, (value) => { hermesApprovals = value; }),
+          el('p', { class: 'field-note' }, 'With a paired model, OpenDex asks before sending a task to the VPS. Direct Hermes Agent mode sends Model Chat turns to Hermes. The VPS decides which commands require approval.')),
         el('details', { class: 'wide inset' }, el('summary', {}, 'Advanced connection settings'),
           el('div', { class: 'form-grid compact' }, field('Output token limit', tokenLimit),
             field('API key header', keyHeader, 'Leave blank for the adapter default. A custom header receives the saved key as entered.'),
@@ -206,6 +233,8 @@ export function settingsPanel(api) {
           ollama_think: think === 'default' ? null : think === 'true',
           anthropic_auth: anthropic ? anthropicAuth : 'api',
           claude_path: claudePath.value,
+          hermes_remote_approvals: provider.kind === 'open_ai_compatible' && hermesApprovals,
+          local_execution: provider.kind === 'open_ai_compatible' ? localExecution : null,
         };
         const value = { ...provider, ...valuePatch };
         const saved = await api.invoke('save_provider', { value, secret: anthropic && anthropicAuth === 'account' ? null : secret.value || null, forget });

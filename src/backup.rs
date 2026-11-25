@@ -6,7 +6,7 @@ use crate::{
         Appearance, Data, McpScope, Permissions, Profile, Project, Provider, ProviderKind, Server,
         Store, Transport, delete_secret, read_secret, write_secret,
     },
-    web,
+    transcription, voice, web,
 };
 use age::secrecy::SecretString;
 use anyhow::{Context, Result, ensure};
@@ -45,6 +45,75 @@ struct Connection<T> {
 }
 
 #[derive(Serialize, Deserialize)]
+struct VoiceArchive {
+    profiles: Vec<Connection<voice::Profile>>,
+    selected: Option<Uuid>,
+    autoplay: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DictationArchive {
+    settings: transcription::Settings,
+    key: Option<ArchiveKey>,
+}
+
+impl VoiceArchive {
+    fn capture(settings: &voice::Settings) -> Result<Self> {
+        let profiles = settings
+            .profiles
+            .iter()
+            .map(|profile| {
+                let key = profile
+                    .secret()
+                    .with_context(|| format!("Could not back up the key for {}.", profile.name))?;
+                let mut settings = profile.clone();
+                settings.secret_ref = None;
+                Ok(Connection {
+                    settings,
+                    key: key.map(ArchiveKey),
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            profiles,
+            selected: settings.selected,
+            autoplay: settings.autoplay,
+        })
+    }
+
+    fn validate(&mut self) -> Result<()> {
+        let mut ids = HashSet::new();
+        for entry in &mut self.profiles {
+            entry.settings.validate()?;
+            ensure!(
+                ids.insert(entry.settings.id),
+                "The backup contains duplicate voice connection IDs."
+            );
+            entry.settings.secret_ref = None;
+            entry.settings.has_secret = entry.key.is_some();
+        }
+        ensure!(
+            self.selected.is_none_or(|id| ids.contains(&id)),
+            "The active voice is missing from the backup."
+        );
+        self.autoplay &= self.selected.is_some();
+        Ok(())
+    }
+
+    fn into_settings(self) -> voice::Settings {
+        voice::Settings {
+            profiles: self
+                .profiles
+                .into_iter()
+                .map(|entry| entry.settings)
+                .collect(),
+            selected: self.selected,
+            autoplay: self.autoplay,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Archive {
     format: String,
     version: u32,
@@ -54,6 +123,14 @@ pub struct Archive {
     web_search: Option<web::Config>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_generation: Option<images::Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_sources: Option<Vec<Connection<images::Source>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_source_default: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    voice: Option<VoiceArchive>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dictation: Option<DictationArchive>,
     projects: Vec<Project>,
     permissions: Permissions,
     appearance: Appearance,
@@ -78,6 +155,8 @@ pub struct Preview {
     pub mcp_servers: Vec<String>,
     pub web_search: Option<&'static str>,
     pub image_model: Option<String>,
+    pub image_sources: Option<Vec<String>>,
+    pub voice_profiles: Option<Vec<String>>,
     pub local_servers: Vec<String>,
     pub projects: Vec<ProjectPreview>,
     pub has_chatgpt_connection: bool,
@@ -129,6 +208,31 @@ impl Archive {
                 })
             })
             .collect::<Result<_>>()?;
+        let image_sources = data
+            .image_sources
+            .iter()
+            .map(|source| {
+                let key = source
+                    .secret()
+                    .with_context(|| format!("Could not back up the key for {}.", source.name))?;
+                let mut settings = source.clone();
+                settings.secret_ref = None;
+                Ok(Connection {
+                    settings,
+                    key: key.map(ArchiveKey),
+                })
+            })
+            .collect::<Result<_>>()?;
+        let mut dictation = data.dictation.clone();
+        let key = if let Some(endpoint) = &mut dictation.endpoint {
+            let key = endpoint
+                .secret()
+                .context("Could not back up the dictation endpoint key.")?;
+            endpoint.secret_ref = None;
+            key.map(ArchiveKey)
+        } else {
+            None
+        };
         Ok(Self {
             chatgpt_session: if data
                 .providers
@@ -145,6 +249,13 @@ impl Archive {
             servers,
             web_search: data.web_search.clone(),
             image_generation: data.image_generation.clone(),
+            image_sources: Some(image_sources),
+            image_source_default: data.image_source_default,
+            voice: Some(VoiceArchive::capture(&data.voice)?),
+            dictation: Some(DictationArchive {
+                settings: dictation,
+                key,
+            }),
             projects: data.projects.clone(),
             permissions: data.permissions.clone(),
             appearance: data.appearance.clone(),
@@ -192,10 +303,51 @@ impl Archive {
         if let Some(search) = &self.web_search {
             search.resolve(self.providers.iter().map(|entry| &entry.settings))?;
         }
+        let mut image_ids = HashSet::new();
+        let mut image_names = HashSet::new();
+        if let Some(sources) = &mut self.image_sources {
+            ensure!(
+                sources.len() <= 32,
+                "The backup has too many image sources."
+            );
+            for source in sources {
+                source.settings.validate()?;
+                ensure!(
+                    ids.insert(source.settings.id)
+                        && image_ids.insert(source.settings.id)
+                        && image_names.insert(source.settings.name.to_lowercase()),
+                    "The backup contains duplicate image sources."
+                );
+                source.settings.secret_ref = None;
+                source.settings.has_secret = source.key.is_some();
+            }
+        }
         if let Some(config) = &mut self.image_generation {
             config.validate()?;
-            config.resolve(self.providers.iter().map(|entry| &entry.settings))?;
+            if !image_ids.contains(&config.provider) {
+                config.resolve(self.providers.iter().map(|entry| &entry.settings))?;
+            }
         }
+        if let Some(voice) = &mut self.voice {
+            voice.validate()?;
+        }
+        if let Some(dictation) = &mut self.dictation {
+            dictation.settings.validate()?;
+            if let Some(endpoint) = &mut dictation.settings.endpoint {
+                endpoint.secret_ref = None;
+                endpoint.has_secret = dictation.key.is_some();
+            } else {
+                ensure!(
+                    dictation.key.is_none(),
+                    "The backup includes a dictation key without an endpoint."
+                );
+            }
+        }
+        ensure!(
+            self.image_source_default
+                .is_none_or(|id| image_ids.contains(&id)),
+            "The default image source is missing from the backup."
+        );
         for server in &mut self.servers {
             server.settings.validate()?;
             ensure!(
@@ -229,6 +381,19 @@ impl Archive {
                 .image_generation
                 .as_ref()
                 .map(|config| config.model.clone()),
+            image_sources: self.image_sources.as_ref().map(|sources| {
+                sources
+                    .iter()
+                    .map(|source| source.settings.name.clone())
+                    .collect()
+            }),
+            voice_profiles: self.voice.as_ref().map(|voice| {
+                voice
+                    .profiles
+                    .iter()
+                    .map(|entry| entry.settings.name.clone())
+                    .collect()
+            }),
             providers: self
                 .providers
                 .iter()
@@ -298,7 +463,7 @@ impl Archive {
             .transpose()?;
         let mut staged = StagedKeys::default();
         let previous = store.change(|data| {
-            let previous: Vec<_> = data
+            let mut previous: Vec<_> = data
                 .providers
                 .iter()
                 .filter(|provider| provider.has_secret)
@@ -317,6 +482,44 @@ impl Archive {
             for entry in &mut self.servers {
                 entry.settings.secret_ref =
                     staged.add(&entry.settings.address, entry.key.as_ref())?;
+            }
+            if let Some(sources) = &mut self.image_sources {
+                previous.extend(
+                    data.image_sources
+                        .iter()
+                        .filter(|source| source.has_secret)
+                        .map(|source| (source.credential_id(), source.endpoint.clone())),
+                );
+                for source in sources {
+                    source.settings.secret_ref =
+                        staged.add(&source.settings.endpoint, source.key.as_ref())?;
+                }
+            }
+            if let Some(voice) = &mut self.voice {
+                previous.extend(
+                    data.voice
+                        .profiles
+                        .iter()
+                        .filter(|profile| profile.has_secret)
+                        .map(|profile| (profile.credential_id(), profile.endpoint.clone())),
+                );
+                for entry in &mut voice.profiles {
+                    entry.settings.secret_ref =
+                        staged.add(&entry.settings.endpoint, entry.key.as_ref())?;
+                }
+            }
+            if let Some(dictation) = &mut self.dictation {
+                if let Some(old) = data
+                    .dictation
+                    .endpoint
+                    .as_ref()
+                    .filter(|old| old.has_secret)
+                {
+                    previous.push((old.credential_id(), old.url.clone()));
+                }
+                if let Some(endpoint) = &mut dictation.settings.endpoint {
+                    endpoint.secret_ref = staged.add(&endpoint.url, dictation.key.as_ref())?;
+                }
             }
             self.apply(data);
             Ok(previous)
@@ -347,7 +550,23 @@ impl Archive {
             .map(|entry| entry.settings)
             .collect();
         data.set_web_search(self.web_search);
-        data.image_generation = self.image_generation;
+        if let Some(sources) = self.image_sources {
+            data.image_sources = sources.into_iter().map(|source| source.settings).collect();
+            data.image_generation = self.image_generation;
+            data.image_source_default = self.image_source_default;
+        } else if !data.image_generation.as_ref().is_some_and(|config| {
+            data.image_sources
+                .iter()
+                .any(|source| source.id == config.provider)
+        }) {
+            data.image_generation = self.image_generation;
+        }
+        if let Some(voice) = self.voice {
+            data.voice = voice.into_settings();
+        }
+        if let Some(dictation) = self.dictation {
+            data.dictation = dictation.settings;
+        }
         data.appearance = self.appearance;
         data.permissions = self.permissions;
         data.instructions = self.instructions;

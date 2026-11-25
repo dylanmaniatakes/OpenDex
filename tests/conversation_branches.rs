@@ -55,7 +55,7 @@ fn editing_keeps_attachments_and_leaves_the_source_intact() {
     assert_eq!(branch.messages[0].text, "Revised question");
     assert!(branch.messages[0].content().contains("Saved file snapshot"));
     assert_eq!(branch.messages[0].attachments.len(), 2);
-    assert_eq!(branch.messages[0].attachments[1].text, "fixture-image");
+    assert_eq!(&*branch.messages[0].attachments[1].text, "fixture-image");
     assert!(
         branch.messages[0]
             .content()

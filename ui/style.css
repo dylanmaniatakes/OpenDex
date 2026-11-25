@@ -211,7 +211,7 @@ th { background: var(--panel); }
 #attachment-row { padding: 6px var(--space) 0; }
 .composer-controls, .model-controls, .send-controls { display: flex; align-items: center; min-width: 0; gap: 8px; }
 .composer-controls { justify-content: space-between; }
-#web-search[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); }
+:is(#web-search, #dictation)[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); }
 .model-controls { flex: 1; }
 .send-controls { flex-shrink: 0; }
 .control-divider { background: var(--line); width: 1px; height: 19px; }

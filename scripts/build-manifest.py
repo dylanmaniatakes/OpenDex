@@ -27,12 +27,13 @@ def git_value(value):
     try:
         result = subprocess.run(value, check=True, capture_output=True, text=True)
     except (OSError, subprocess.SubprocessError):
-        return (None, None)
-    return result.stdout.strip() or None, result.returncode == 0
+        return None
+    return result.stdout.strip() or None
 
-commit, git_available = git_value(["git", "rev-parse", "HEAD"])
+commit = git_value(["git", "rev-parse", "HEAD"])
+in_worktree = git_value(["git", "rev-parse", "--is-inside-work-tree"])
 dirty = False
-if git_available:
+if in_worktree == "true":
     status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
     dirty = status.returncode != 0 or bool(status.stdout.strip())
 
@@ -51,7 +52,7 @@ manifest = {
         "dirty": dirty,
     },
     "bundle": {
-        "path": str(destination),
+        "path": destination.name,
         "identifier": command(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleIdentifier", str(destination / "Contents/Info.plist")]),
         "signature": identity,
         "signed": command(["codesign", "--verify", "--strict", str(destination)]) == "",

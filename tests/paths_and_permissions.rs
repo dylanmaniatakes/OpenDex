@@ -3,7 +3,7 @@ use opendex::{
     state::{McpScope, Mode, Permissions, Profile, Rule, Server, Store},
 };
 use serde_json::json;
-use std::{fs, net::TcpListener};
+use std::{fs, io::Write, net::TcpListener};
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -16,19 +16,48 @@ fn file_attachments_keep_order_and_enforce_a_combined_limit() {
     fs::write(&image, b"\x89PNG\r\n\x1a\nfixture").unwrap();
     let files = agent::load_attachments(vec![text.clone(), image.clone(), text.clone()]).unwrap();
     assert_eq!(files.len(), 2);
-    assert_eq!(files[0].1.text, "Notes for the graph");
+    assert_eq!(&*files[0].1.text, "Notes for the graph");
     assert_eq!(files[1].1.media_type.as_deref(), Some("image/png"));
     assert!(agent::load_attachments(vec![text; 9]).is_err());
 
-    let mut large_image = b"\x89PNG\r\n\x1a\n".to_vec();
-    large_image.resize(5 * 1024 * 1024, 0);
+    let large_pdf = directory.path().join("large.pdf");
+    let mut file = fs::File::create(&large_pdf).unwrap();
+    file.write_all(b"%PDF-1.7\n").unwrap();
+    file.set_len(13 * 1024 * 1024).unwrap();
+    drop(file);
+    let large = agent::load_attachments(vec![large_pdf]).unwrap();
+    assert_eq!(large[0].1.media_type.as_deref(), Some("application/pdf"));
+    assert!(large[0].1.text.starts_with("JVBERi0"));
+    assert_eq!(
+        large[0].1.text.len(),
+        (13_usize * 1024 * 1024).div_ceil(3) * 4
+    );
+
     let second = directory.path().join("second.png");
     let third = directory.path().join("third.png");
-    for path in [&image, &second, &third] {
-        fs::write(path, &large_image).unwrap();
+    for (path, mib) in [(&image, 70), (&second, 70), (&third, 60)] {
+        fs::File::create(path)
+            .unwrap()
+            .set_len(mib * 1024 * 1024)
+            .unwrap();
     }
+    assert_eq!(
+        agent::inspect_attachments(vec![image.clone(), second.clone(), third.clone()])
+            .unwrap()
+            .len(),
+        3
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&third)
+        .unwrap()
+        .set_len(60 * 1024 * 1024 + 1)
+        .unwrap();
+    assert!(
+        agent::inspect_attachments(vec![image.clone(), second.clone(), third.clone()]).is_err()
+    );
     let error = agent::load_attachments(vec![image, second, third]).unwrap_err();
-    assert!(error.to_string().contains("12 MiB"));
+    assert!(error.to_string().contains("200 MiB"));
 }
 
 #[test]

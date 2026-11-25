@@ -6,13 +6,13 @@ use crate::{
     state::{Attachment, Mode, Permissions, Profile, Rule},
 };
 use anyhow::{Context, Result, bail, ensure};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{encoded_len, engine::general_purpose::STANDARD, write::EncoderWriter};
 use ignore::WalkBuilder;
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
     fs,
-    io::{Read, Write},
+    io::{self, Read, Seek, Write},
     path::{Component, Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -23,8 +23,7 @@ use tokio::{
 };
 
 const MAX_FILE: u64 = 1024 * 1024;
-const MAX_MEDIA: u64 = 5 * 1024 * 1024;
-const MAX_ATTACHMENT_BYTES: u64 = 12 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 8;
 const MAX_OUTPUT: usize = 64 * 1024;
 
@@ -168,7 +167,14 @@ fn text_file(path: &Path) -> Result<String> {
     Ok(text)
 }
 
-pub fn load_attachments(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, Attachment)>> {
+struct AttachmentFile {
+    path: PathBuf,
+    name: String,
+    file: fs::File,
+    size: u64,
+}
+
+fn attachment_files(paths: Vec<PathBuf>) -> Result<Vec<AttachmentFile>> {
     ensure!(
         paths.len() <= MAX_ATTACHMENTS,
         "Attach up to eight files per message."
@@ -180,66 +186,112 @@ pub fn load_attachments(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, Attachment)
         let name = path
             .file_name()
             .context("The selected file has no name.")?
-            .to_string_lossy();
+            .to_string_lossy()
+            .into_owned();
         let canonical = path
             .canonicalize()
             .with_context(|| format!("Attachment {name} is unavailable."))?;
         if !seen.insert(canonical.clone()) {
             continue;
         }
-        let (attachment, bytes) = read_attachment(name.as_ref(), &canonical)
-            .with_context(|| format!("Could not attach {name}."))?;
-        total += bytes;
         ensure!(
-            total <= MAX_ATTACHMENT_BYTES,
-            "Attachments can total up to 12 MiB."
+            canonical.symlink_metadata()?.is_file(),
+            "Attachment {name} must be a regular file."
         );
-        files.push((path, attachment));
+        let file = fs::File::open(&canonical)
+            .with_context(|| format!("Could not open attachment {name}."))?;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file(),
+            "Attachment {name} must be a regular file."
+        );
+        let size = metadata.len();
+        ensure!(
+            size <= MAX_ATTACHMENT_BYTES - total,
+            "Attachments can total up to 200 MiB per message."
+        );
+        total += size;
+        files.push(AttachmentFile {
+            path,
+            name,
+            file,
+            size,
+        });
     }
     Ok(files)
 }
 
-fn read_attachment(name: &str, canonical: &Path) -> Result<(Attachment, u64)> {
-    ensure!(
-        canonical.symlink_metadata()?.is_file(),
-        "Choose a regular file."
-    );
-    let mut file = fs::File::open(canonical)?;
-    let mut header = [0; 12];
-    let n = file.read(&mut header)?;
-    let header = &header[..n];
+pub fn inspect_attachments(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, String)>> {
+    Ok(attachment_files(paths)?
+        .into_iter()
+        .map(|file| (file.path, file.name))
+        .collect())
+}
+
+pub fn load_attachments(paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, Attachment)>> {
+    let mut remaining = MAX_ATTACHMENT_BYTES;
+    let mut attachments = Vec::new();
+    for AttachmentFile {
+        path,
+        name,
+        mut file,
+        size,
+    } in attachment_files(paths)?
+    {
+        let (attachment, bytes) = read_attachment(&name, &mut file, size, remaining)
+            .with_context(|| format!("Could not attach {name}."))?;
+        remaining -= bytes;
+        attachments.push((path, attachment));
+    }
+    Ok(attachments)
+}
+
+fn read_attachment(
+    name: &str,
+    file: &mut fs::File,
+    size: u64,
+    remaining: u64,
+) -> Result<(Attachment, u64)> {
+    let mut header = Vec::with_capacity(12);
+    Read::by_ref(file).take(12).read_to_end(&mut header)?;
     let mime = if header.starts_with(b"%PDF-") {
         Some("application/pdf")
     } else {
-        raster_mime(header)
+        raster_mime(&header)
     };
-    let limit = if mime.is_some() { MAX_MEDIA } else { MAX_FILE };
-    let mut bytes = header.to_vec();
-    file.take(limit + 1 - n as u64).read_to_end(&mut bytes)?;
-    let size = bytes.len() as u64;
-    let text = if mime.is_some() {
-        ensure!(
-            size <= limit,
-            "Image and PDF attachments can be up to 5 MiB."
-        );
-        STANDARD.encode(bytes)
+    file.rewind()?;
+    let mut input = file.take(remaining + 1);
+    let capacity = size.min(remaining) as usize;
+    let (text, bytes) = if mime.is_some() {
+        let mut encoded =
+            Vec::with_capacity(encoded_len(capacity, true).expect("bounded file size"));
+        let mut encoder = EncoderWriter::new(&mut encoded, &STANDARD);
+        let bytes = io::copy(&mut input, &mut encoder)?;
+        encoder.finish()?;
+        drop(encoder);
+        (String::from_utf8(encoded).expect("Base64 is UTF-8"), bytes)
     } else {
-        ensure!(size <= limit, "Text attachments can be up to 1 MiB.");
-        let text = String::from_utf8(bytes)
+        let mut text = String::with_capacity(capacity);
+        let bytes = input
+            .read_to_string(&mut text)
             .context("Choose UTF-8 text, a PDF, a PNG, JPEG, GIF, or WebP image.")?;
         ensure!(
             !text.contains('\0'),
             "Binary attachments must be an image or PDF."
         );
-        text
+        (text, bytes as u64)
     };
+    ensure!(
+        bytes <= remaining,
+        "Attachments can total up to 200 MiB per message."
+    );
     Ok((
         Attachment {
             name: name.into(),
-            text,
+            text: text.into(),
             media_type: mime.map(str::to_owned),
         },
-        size,
+        bytes,
     ))
 }
 
