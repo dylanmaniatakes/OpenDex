@@ -19,8 +19,20 @@ const MAX_RESULTS: u64 = 10;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Config {
-    Searxng { endpoint: String },
-    Ollama { provider: Uuid },
+    Searxng {
+        endpoint: String,
+    },
+    Ollama {
+        provider: Uuid,
+    },
+    /// API-key services. The key lives in the system credential store under
+    /// `id`, never in workspace.json.
+    Brave {
+        id: Uuid,
+    },
+    Tavily {
+        id: Uuid,
+    },
 }
 
 impl Config {
@@ -28,6 +40,17 @@ impl Config {
         match self {
             Self::Searxng { .. } => "SearXNG",
             Self::Ollama { .. } => "Ollama Cloud",
+            Self::Brave { .. } => "Brave Search",
+            Self::Tavily { .. } => "Tavily",
+        }
+    }
+
+    /// Configuration id used for the credential-store entry, when the service
+    /// needs a key.
+    pub fn secret_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Brave { id } | Self::Tavily { id } => Some(*id),
+            _ => None,
         }
     }
 
@@ -45,13 +68,29 @@ impl Config {
                 endpoint(&provider.endpoint)?;
                 Ok(Service::Ollama(provider.clone()))
             }
+            Self::Brave { id } => Ok(Service::Brave {
+                key: search_key(*id)?,
+            }),
+            Self::Tavily { id } => Ok(Service::Tavily {
+                key: search_key(*id)?,
+            }),
         }
     }
+}
+
+const BRAVE_SEARCH: &str = "https://api.search.brave.com/res/v1/web/search";
+const TAVILY_SEARCH: &str = "https://api.tavily.com/search";
+
+fn search_key(id: Uuid) -> Result<String> {
+    crate::state::read_secret(id, "web-search", true)?
+        .context("Save an API key for this search service in Settings.")
 }
 
 pub enum Service {
     Searxng(Url),
     Ollama(Provider),
+    Brave { key: String },
+    Tavily { key: String },
 }
 
 #[derive(Debug)]
@@ -127,6 +166,8 @@ impl Service {
         match self {
             Self::Searxng(url) => format!("SearXNG · {}", url.host_str().unwrap_or_default()),
             Self::Ollama(provider) => format!("{} · {}", provider.name, provider.endpoint),
+            Self::Brave { .. } => "Brave Search".into(),
+            Self::Tavily { .. } => "Tavily".into(),
         }
     }
 
@@ -152,36 +193,7 @@ impl Service {
     pub async fn execute(&self, client: &Client, action: Action) -> Result<Output> {
         match action {
             Action::Search { query, limit } => {
-                let request = match self {
-                    Self::Searxng(url) => client
-                        .get(url.clone())
-                        .query(&[("q", query.as_str()), ("format", "json")]),
-                    Self::Ollama(provider) => {
-                        ollama_request(
-                            client,
-                            provider,
-                            SEARCH,
-                            json!({"query":query,"max_results":limit}),
-                        )
-                        .await?
-                    }
-                };
-                let response = response(request, matches!(self, Self::Searxng(_))).await?;
-                let results = response["results"]
-                    .as_array()
-                    .context("The search service did not return a results array.")?;
-                let mut urls = HashSet::new();
-                let sources = results
-                    .iter()
-                    .filter_map(|item| {
-                        let url = http_url(item["url"].as_str()?).ok()?.to_string();
-                        if !urls.insert(url.clone()) {
-                            return None;
-                        }
-                        Some(source(item, url, 1_600))
-                    })
-                    .take(limit as usize)
-                    .collect();
+                let sources = self.search(client, &query, limit).await?;
                 Ok(Output {
                     query: Some(query),
                     sources,
@@ -205,6 +217,92 @@ impl Service {
             }
         }
     }
+}
+
+impl Service {
+    async fn search(&self, client: &Client, query: &str, limit: u64) -> Result<Vec<Source>> {
+        match self {
+            Self::Searxng(url) => {
+                let request = client
+                    .get(url.clone())
+                    .query(&[("q", query), ("format", "json")]);
+                let response = response(request, true).await?;
+                let results = response["results"]
+                    .as_array()
+                    .context("The search service did not return a results array.")?;
+                Ok(collect(results, "content", limit))
+            }
+            Self::Ollama(provider) => {
+                let request = ollama_request(
+                    client,
+                    provider,
+                    SEARCH,
+                    json!({"query":query,"max_results":limit}),
+                )
+                .await?;
+                let response = response(request, false).await?;
+                let results = response["results"]
+                    .as_array()
+                    .context("The search service did not return a results array.")?;
+                Ok(collect(results, "content", limit))
+            }
+            Self::Brave { key } => {
+                let count = limit.to_string();
+                let request = client
+                    .get(BRAVE_SEARCH)
+                    .query(&[("q", query), ("count", count.as_str())])
+                    .header("X-Subscription-Token", key)
+                    .header("Accept", "application/json");
+                let response = response(request, false)
+                    .await
+                    .context("Brave Search did not respond. Check the API key and plan.")?;
+                let results = response["web"]["results"]
+                    .as_array()
+                    .context("Brave Search did not return web.results.")?;
+                Ok(collect(results, "description", limit))
+            }
+            Self::Tavily { key } => {
+                let request = client
+                    .post(TAVILY_SEARCH)
+                    .header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"))
+                    .json(&json!({"query": query, "max_results": limit, "include_answer": false}));
+                let response = response(request, false)
+                    .await
+                    .context("Tavily did not respond. Check the API key and plan.")?;
+                let results = response["results"]
+                    .as_array()
+                    .context("Tavily did not return a results array.")?;
+                Ok(collect(results, "content", limit))
+            }
+        }
+    }
+}
+
+/// Map a provider-specific results array to sources, keeping the first
+/// occurrence of each URL and reading the text from `content_key`.
+fn collect(items: &[Value], content_key: &str, limit: u64) -> Vec<Source> {
+    let mut urls = HashSet::new();
+    items
+        .iter()
+        .filter_map(|item| {
+            let url = http_url(item["url"].as_str()?).ok()?.to_string();
+            if !urls.insert(url.clone()) {
+                return None;
+            }
+            let title = item["title"].as_str().unwrap_or_default().trim();
+            let content = item[content_key].as_str().unwrap_or_default().trim();
+            Some(Source {
+                title: if title.is_empty() {
+                    url.clone()
+                } else {
+                    title.chars().take(250).collect()
+                },
+                url,
+                content: content.chars().take(1_600).collect(),
+            })
+        })
+        .take(limit as usize)
+        .collect()
 }
 
 async fn ollama_request(
@@ -350,5 +448,53 @@ mod tests {
             }
             server.join().unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    #[test]
+    fn brave_results_use_the_description_field() {
+        let payload: Value = serde_json::from_str(
+            r#"{"web":{"results":[
+            {"title":"Rust","url":"https://www.rust-lang.org/","description":"A language."},
+            {"title":"Rust","url":"https://www.rust-lang.org/","description":"Duplicate."},
+            {"title":"Docs","url":"https://doc.rust-lang.org/","description":"Reference."}
+        ]}}"#,
+        )
+        .unwrap();
+        let results = collect(
+            payload["web"]["results"].as_array().unwrap(),
+            "description",
+            5,
+        );
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].content, "A language.");
+    }
+
+    #[test]
+    fn tavily_results_use_the_content_field() {
+        let payload: Value = serde_json::from_str(
+            r#"{"results":[
+            {"title":"OpenDex","url":"https://example.org/","content":"Desktop app."}
+        ]}"#,
+        )
+        .unwrap();
+        let results = collect(payload["results"].as_array().unwrap(), "content", 5);
+        assert_eq!(results[0].title, "OpenDex");
+        assert_eq!(results[0].content, "Desktop app.");
+    }
+
+    #[test]
+    fn non_http_urls_are_dropped() {
+        let payload: Value = serde_json::from_str(
+            r#"{"results":[
+            {"title":"Local","url":"file:///etc/passwd","content":"x"}
+        ]}"#,
+        )
+        .unwrap();
+        assert!(collect(payload["results"].as_array().unwrap(), "content", 5).is_empty());
     }
 }

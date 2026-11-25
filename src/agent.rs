@@ -2,6 +2,7 @@
 use crate::{
     images::raster_mime,
     mcp::process_path,
+    memory,
     providers::Tool,
     state::{Attachment, Mode, Permissions, Profile, Rule},
 };
@@ -27,7 +28,7 @@ const MAX_ATTACHMENT_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 8;
 const MAX_OUTPUT: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     Read,
     Write,
@@ -82,6 +83,9 @@ pub fn tools(mode: Mode, root: Option<&Path>, policy: &Permissions) -> Vec<Tool>
             definition("edit_file", "Replace exactly one matching string in a workspace file. Read the file before editing.", json!({
                 "path":{"type":"string"}, "old_text":{"type":"string"}, "new_text":{"type":"string"}
             }), &["path","old_text","new_text"]),
+            definition("remember", "Save a durable note about this project for future turns. Use it for conventions, decisions, and gotchas the user would want carried forward; keep each note short and factual.", json!({
+                "note":{"type":"string","description":"One fact or decision, up to 2,000 bytes."}
+            }), &["note"]),
         ]);
     }
     if policy.command != Rule::Deny {
@@ -95,9 +99,20 @@ pub fn tools(mode: Mode, root: Option<&Path>, policy: &Permissions) -> Vec<Tool>
 pub fn capability(name: &str) -> Option<Capability> {
     match name {
         "list_files" | "read_file" | "search_files" | "workspace_diff" => Some(Capability::Read),
-        "create_file" | "edit_file" => Some(Capability::Write),
+        "create_file" | "edit_file" | "remember" => Some(Capability::Write),
         "run_command" => Some(Capability::Command),
         _ => None,
+    }
+}
+
+/// Permanently allow one tool category by switching to the custom profile.
+pub fn always_allow(policy: &mut Permissions, capability: Capability) {
+    policy.profile = Profile::Custom;
+    match capability {
+        Capability::Read => policy.read = Rule::Allow,
+        Capability::Write => policy.write = Rule::Allow,
+        Capability::Command => policy.command = Rule::Allow,
+        Capability::Mcp => policy.mcp = Rule::Allow,
     }
 }
 
@@ -463,6 +478,10 @@ pub async fn execute(
     );
     match name {
         "workspace_diff" => diff(root).await,
+        "remember" => {
+            memory::append(root, arg(arguments, "note")?)?;
+            Ok("Saved to project memory.".into())
+        }
         "run_command" => {
             let program = arg(arguments, "program")?;
             let args = arguments["args"]
@@ -747,5 +766,70 @@ impl Drop for ProcessGroup {
                 libc::kill(-(pid as i32), libc::SIGKILL);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Profile;
+
+    #[test]
+    fn always_allow_upgrades_only_the_requested_category() {
+        let mut policy = Permissions::default();
+        assert_eq!(policy.profile, Profile::Workspace);
+        assert_eq!(policy.command, Rule::Ask);
+
+        always_allow(&mut policy, Capability::Command);
+        assert_eq!(policy.profile, Profile::Custom);
+        assert_eq!(policy.command, Rule::Allow);
+        // Unrelated categories keep the workspace defaults.
+        assert_eq!(policy.write, Rule::Ask);
+        assert_eq!(policy.mcp, Rule::Ask);
+        assert_eq!(policy.effective().command, Rule::Allow);
+
+        always_allow(&mut policy, Capability::Read);
+        assert_eq!(policy.read, Rule::Allow);
+        assert_eq!(policy.write, Rule::Ask);
+    }
+
+    #[test]
+    fn only_tools_with_rules_can_be_always_allowed() {
+        // Web and MCP calls have no approval rule in this list, so the
+        // approval card must not offer the button for them.
+        assert!(capability("web_search").is_none());
+        assert!(capability("mcp__example__tool").is_none());
+        assert_eq!(capability("run_command"), Some(Capability::Command));
+    }
+
+    #[test]
+    fn remember_is_gated_by_write_permission() {
+        let root = tempfile::tempdir().unwrap();
+        let mut policy = Permissions::default();
+        policy.write = Rule::Allow;
+        let offered = tools(Mode::Agent, Some(root.path()), &policy);
+        assert!(offered.iter().any(|tool| tool.name == "remember"));
+
+        policy.write = Rule::Deny;
+        let offered = tools(Mode::Agent, Some(root.path()), &policy);
+        assert!(!offered.iter().any(|tool| tool.name == "remember"));
+    }
+
+    #[tokio::test]
+    async fn remember_writes_a_project_note() {
+        let root = tempfile::tempdir().unwrap();
+        let mut policy = Permissions::default();
+        policy.write = Rule::Allow;
+        let output = execute(
+            root.path(),
+            &policy,
+            "remember",
+            &json!({"note": "Deploy uses fly.io."}),
+        )
+        .await
+        .unwrap();
+        assert!(output.contains("project memory"));
+        let text = memory::read(root.path()).unwrap().unwrap();
+        assert!(text.contains("fly.io"));
     }
 }

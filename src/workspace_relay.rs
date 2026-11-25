@@ -29,11 +29,19 @@ const CLOSE: &str = "</opendex-workspace-call>";
 const REQUEST_LIMIT: usize = 128 * 1024;
 const MAX_CALLS: usize = 8;
 
-pub fn instructions(grant: Uuid, tools: &[Tool]) -> String {
+pub fn instructions(grant: Uuid, tools: &[Tool], project: &str) -> String {
     let tools = json!(tools);
-    format!(
-        "The OpenDex computer has an active project and the following local tools: {tools}. Use a local workspace tool for all reads, edits, and commands involving the user's computer. Built-in Hermes tools operate on the VPS. Use them only for requests that specifically require the VPS. Never use SSH or a VPS terminal to operate on the OpenDex computer.\n\nRequest local tools by ending your reply with one envelope per call, each on its own line, in the order they should run. OpenDex runs each request with the user's permissions and sends the results back for you to continue. Use workspace-relative paths and wait for each result before continuing. A request alone does not mean that a tool ran. Return a normal answer once the task is complete.\n\nEnvelope format, exactly as written here: the opening tag, then one JSON object with the keys grant, name, and arguments, then the closing tag, and nothing after it. Do not use XML attributes or any other tool-call markup.\n{OPEN}{{\"grant\":\"{grant}\",\"name\":\"tool_name\",\"arguments\":{{}}}}{CLOSE}"
-    )
+    let mut out = format!(
+        "The OpenDex computer has an active project and the following local tools: {tools}. Use a local workspace tool for all reads, edits, and commands involving the user's computer. Built-in Hermes tools operate on the VPS. Use them only for requests that specifically require the VPS. Never use SSH or a VPS terminal to operate on the OpenDex computer.\n\n"
+    );
+    if !project.trim().is_empty() {
+        out.push_str(project);
+        out.push_str("\n\n");
+    }
+    out.push_str(&format!(
+        "Request local tools by ending your reply with one envelope per call, each on its own line, in the order they should run. OpenDex runs each request with the user's permissions and sends the results back for you to continue. Use workspace-relative paths and wait for each result before continuing. A request alone does not mean that a tool ran. Return a normal answer once the task is complete.\n\nEnvelope format, exactly as written here: the opening tag, then one JSON object with the keys grant, name, and arguments, then the closing tag, and nothing after it. Do not use XML attributes or any other tool-call markup.\n{OPEN}{{\"grant\":\"{grant}\",\"name\":\"tool_name\",\"arguments\":{{}}}}{CLOSE}"
+    ));
+    out
 }
 
 /// The reason a workspace reply could not be run, phrased for Hermes.
@@ -73,17 +81,13 @@ pub enum Outcome {
 }
 
 pub fn request(text: &str, grant: Uuid) -> Outcome {
-    let starts = text
-        .match_indices(TAG)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
+    let starts = openings(text);
     let segments = starts
         .iter()
         .enumerate()
         .map(|(index, start)| {
-            let from = start + TAG.len();
             let to = starts.get(index + 1).copied().unwrap_or(text.len());
-            &text[from..to]
+            &text[*start..to]
         })
         .collect::<Vec<_>>();
     let Some((last, earlier)) = segments.split_last() else {
@@ -119,7 +123,7 @@ fn extract(segment: &str, grant: Uuid) -> Result<(ToolCall, usize), String> {
     let trimmed = segment.trim();
     if trimmed.starts_with('{')
         && trimmed.len() <= REQUEST_LIMIT
-        && let Ok(request) = serde_json::from_str::<Request>(trimmed)
+        && let Some(request) = parse_request(trimmed)
     {
         let call = validate(request, grant)?;
         let end = segment.rfind('}').map_or(segment.len(), |index| index + 1);
@@ -127,7 +131,7 @@ fn extract(segment: &str, grant: Uuid) -> Result<(ToolCall, usize), String> {
     }
     if let Some((value, end)) = balanced_object(segment)
         && value.len() <= REQUEST_LIMIT
-        && let Ok(request) = serde_json::from_str::<Request>(&value)
+        && let Some(request) = parse_request(&value)
     {
         return Ok((validate(request, grant)?, end));
     }
@@ -184,6 +188,18 @@ fn validate(request: Request, grant: Uuid) -> Result<ToolCall, String> {
         name: request.name,
         arguments: request.arguments,
     })
+}
+
+/// Parse the request object, tolerating one extra brace layer.
+///
+/// Models have sent `{{"grant":…,"name":…}}`: the object wrapped in a second
+/// pair of braces, which is not JSON but is unambiguous about the request.
+fn parse_request(body: &str) -> Option<Request> {
+    if let Ok(request) = serde_json::from_str::<Request>(body) {
+        return Some(request);
+    }
+    let inner = body.strip_prefix('{')?.strip_suffix('}')?;
+    serde_json::from_str::<Request>(inner).ok()
 }
 
 /// The first balanced `{…}` object in `text`, honouring JSON string escapes.
@@ -245,6 +261,93 @@ fn attribute(text: &str, keys: &[&str]) -> Option<(String, usize)> {
     None
 }
 
+/// The envelope's tag name with punctuation removed, for near-miss matching.
+const NAME: &str = "opendexworkspacecall";
+
+/// Offset just past every opening tag that looks like the workspace envelope.
+///
+/// Models misspell the tag — recorded replies used `<opendix-workspace-call>`
+/// and `<opendex-workspacecall>` — and OpenDex has to run those requests
+/// instead of showing the markup as chat.
+fn openings(text: &str) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut offset = 0;
+    while let Some(index) = text[offset..].find('<') {
+        let at = offset + index;
+        let after = &text[at + 1..];
+        let length = after
+            .find(|char: char| !(char.is_ascii_alphanumeric() || char == '-' || char == '_'))
+            .unwrap_or(after.len())
+            .min(64);
+        if length > 3 && alike(&after[..length]) {
+            found.push(at + 1 + length);
+        }
+        offset = at + 1;
+    }
+    found
+}
+
+/// True when a tag name is close enough to the envelope's name to be one.
+fn alike(name: &str) -> bool {
+    let normalized = normalize(name);
+    normalized.len().abs_diff(NAME.len()) <= 4 && distance(&normalized, NAME) <= 3
+}
+
+fn normalize(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|char| char.to_ascii_lowercase())
+        .collect()
+}
+
+fn distance(left: &str, right: &str) -> usize {
+    let right = right.chars().collect::<Vec<_>>();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (row, left) in left.chars().enumerate() {
+        current[0] = row + 1;
+        for (column, right) in right.iter().enumerate() {
+            let change = previous[column] + usize::from(left != *right);
+            current[column + 1] = change
+                .min(previous[column + 1] + 1)
+                .min(current[column] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
+/// While streaming, a tag that has not finished yet could still become the
+/// envelope, so text from that `<` is held back instead of being shown.
+fn could_open(name: &str, ended: bool) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    let normalized = normalize(name);
+    if ended {
+        return normalized.starts_with("opend") || alike(name);
+    }
+    normalized.len() <= NAME.len() + 4
+        && (NAME.starts_with(&normalized)
+            || normalized.starts_with("opend")
+            || TAG.starts_with(&lowered))
+}
+
+/// Offset of an opening tag in streamed text that may still become the envelope.
+fn envelope_start(text: &str) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(index) = text[offset..].find('<') {
+        let at = offset + index;
+        let after = &text[at + 1..];
+        let end =
+            after.find(|char: char| !(char.is_ascii_alphanumeric() || char == '-' || char == '_'));
+        let name = &after[..end.unwrap_or(after.len())];
+        if could_open(name, end.is_some()) {
+            return Some(at);
+        }
+        offset = at + 1;
+    }
+    None
+}
+
 /// Whitespace, code fences, and tags only — never prose.
 fn noise(text: &str) -> bool {
     let mut rest = text;
@@ -281,7 +384,7 @@ impl Display {
             return;
         }
         self.pending.push_str(delta);
-        if let Some(start) = self.pending.find(TAG) {
+        if let Some(start) = envelope_start(&self.pending) {
             if start != 0 {
                 show(&self.pending[..start]);
             }
@@ -289,15 +392,11 @@ impl Display {
             self.tool_request = true;
             return;
         }
-        // Keep only the suffix that could complete the opening marker in the next chunk.
-        let keep = (1..TAG.len())
-            .rev()
-            .find(|&end| self.pending.ends_with(&TAG[..end]))
-            .unwrap_or(0);
-        let end = self.pending.len() - keep;
+        // Nothing to hold: every tag in the buffer was ruled out.
+        let end = self.pending.len();
         if end != 0 {
             show(&self.pending[..end]);
-            self.pending.drain(..end);
+            self.pending.clear();
         }
     }
 
@@ -391,6 +490,38 @@ mod tests {
             json!({"grant":grant,"name":"read_file","arguments":{"path":"package.json"}})
         );
         assert_eq!(calls(request(&misspelled, grant))[0].name, "read_file");
+
+        // Recorded reply: the tag name misspelled, the object inside a second
+        // pair of braces, and a misspelled closing tag.
+        let drifted = format!(
+            "<opendix-workspace-call>{{{}}}</opendix-workspace-call>",
+            json!({"grant":grant,"name":"list_files","arguments":{}})
+        );
+        let call = &calls(request(&drifted, grant))[0];
+        assert_eq!(call.name, "list_files");
+        assert_eq!(call.arguments, json!({}));
+
+        // The same drift stays out of the live view while it streams.
+        let mut display = Display::default();
+        let mut streamed = String::new();
+        for piece in [
+            "Checking.",
+            "\n<opend",
+            "ix-workspace-call>{{",
+            "\"name\":\"list_files\"}}",
+        ] {
+            display.delta(piece, |visible| streamed.push_str(visible));
+        }
+        display.finish(|visible| streamed.push_str(visible));
+        assert_eq!(streamed, "Checking.\n");
+
+        // Prose that merely mentions a tag keeps rendering.
+        let mut display = Display::default();
+        streamed.clear();
+        display.delta("Press <enter", |visible| streamed.push_str(visible));
+        display.delta("> to continue.", |visible| streamed.push_str(visible));
+        display.finish(|visible| streamed.push_str(visible));
+        assert_eq!(streamed, "Press <enter> to continue.");
 
         // A malformed opening tag still keeps the envelope out of the live view.
         let mut display = Display::default();
@@ -497,11 +628,12 @@ mod tests {
         display.finish(|piece| streamed.push_str(piece));
         assert_eq!(streamed, "The workspace is ready.");
 
-        // A partial opening marker at the end of the stream is still shown.
+        // A tag cut off at the end of the stream stays withheld: it may be the
+        // envelope, and the stored message keeps the full text either way.
         let mut display = Display::default();
         streamed.clear();
         display.delta("done <opendex-workspace-", |piece| streamed.push_str(piece));
         display.finish(|piece| streamed.push_str(piece));
-        assert_eq!(streamed, "done <opendex-workspace-");
+        assert_eq!(streamed, "done ");
     }
 }

@@ -60,6 +60,24 @@ async function copy(text) {
   toast('Copied to clipboard.');
 }
 
+let customFontKey;
+async function applyCustomFont(appearance) {
+  const font = appearance.custom_font;
+  const cacheKey = font ? font.file + ':' + font.name : '';
+  if (!font || customFontKey === cacheKey) return;
+  try {
+    const dataUrl = await invoke('font_data', { file: font.file });
+    const family = (font.name || 'OpenDex Custom').replaceAll('"', '');
+    const face = new FontFace(family, `url(${dataUrl})`);
+    await face.load();
+    document.fonts.add(face);
+    document.documentElement.style.setProperty('--custom-font', `"${family}"`);
+    customFontKey = cacheKey;
+  } catch (error) {
+    toast(String(error), true);
+  }
+}
+
 function previewAppearance(appearance) {
   liveAppearance = appearance;
   const root = document.documentElement;
@@ -76,6 +94,7 @@ function previewAppearance(appearance) {
   root.style.setProperty('--content-width', appearance.width + 'px');
   root.style.setProperty('--sidebar-width', appearance.sidebar + 'px');
   root.style.setProperty('--radius', appearance.radius + 'px');
+  if (appearance.font === 'custom') applyCustomFont(appearance);
 }
 
 async function refresh() {
@@ -781,11 +800,17 @@ function renderApproval(approval) {
     el('pre', {}, JSON.stringify(approval.arguments, null, 2)),
     el('div', { class: 'form-actions right' },
       button('Deny', transient(() => answerApproval(approval.id, false))),
+      approval.always && button('Always allow', transient(() => answerApproval(approval.id, true, true))),
       button('Allow once', transient(() => answerApproval(approval.id, true)), { style: 'button primary' })));
 }
 
-async function answerApproval(id, allow) {
-  await invoke('resolve_approval', { id, allow });
+async function answerApproval(id, allow, always = false) {
+  try {
+    await invoke('resolve_approval', { id, allow, always });
+    if (always) await refresh();
+  } catch (error) {
+    toast(String(error), true);
+  }
   unreadApprovals.delete(active);
   render();
 }
@@ -916,6 +941,28 @@ function webDenied() {
   return policy.profile === 'read_only' || (policy.profile === 'custom' && policy.web === 'deny');
 }
 
+const PLAN_INSTRUCTIONS = 'Before changing anything, write a short plan: what you will change, which files are involved, and how you will verify it. Then wait for my confirmation before using tools that edit files or run commands.';
+const GOAL_INSTRUCTIONS = 'Start by restating the goal in one sentence and listing concrete completion criteria. Work toward them, check each criterion, and finish with what is done, what is verified, and what remains.';
+
+async function applyInstructions(thread, instructions, label) {
+  const next = thread.instructions.trim() === instructions.trim() ? '' : instructions;
+  const updated = await invoke('edit_thread', { id: thread.id, changes: { instructions: next } });
+  updateThread(updated);
+  toast(next ? `“${label}” instructions applied to this conversation.` : `“${label}” instructions cleared.`);
+}
+
+function fillPresetMenu() {
+  const host = $('preset-menu');
+  const presets = (data?.presets ?? []).filter((preset) => preset.name.trim());
+  host.hidden = presets.length === 0;
+  host.replaceChildren(...presets.map((preset) =>
+    el('button', { type: 'button', class: 'tool-entry', role: 'menuitem', title: 'Apply ' + preset.name,
+      onclick: transient(() => {
+        const thread = current();
+        if (thread) return applyInstructions(thread, preset.instructions, preset.name);
+      }) }, icon('note', 16), el('span', {}, preset.name))));
+}
+
 function composer(thread) {
   const busy = Boolean(live());
   const draft = draftOf();
@@ -928,6 +975,9 @@ function composer(thread) {
   $('attach').disabled = busy || !thread || draft.loadingFiles;
   $('mcp-context').disabled = busy || !thread;
   $('generate-image').disabled = busy || !thread;
+  $('tools-menu').disabled = !thread;
+  $('plan-mode').disabled = busy || !thread;
+  $('goal-mode').disabled = busy || !thread;
   const recording = dictation.current();
   const microphone = $('dictation');
   const recordingHere = recording?.thread === thread?.id && recording?.stage === 'recording';
@@ -938,8 +988,11 @@ function composer(thread) {
   microphone.setAttribute('aria-pressed', String(recordingHere));
   microphone.disabled = busy || !thread || (!recordingHere && (Boolean(recording) || draft.loadingFiles));
   const webSearch = $('web-search');
+  const webOn = Boolean(thread?.web_enabled && data.web_search && !webDenied());
   webSearch.disabled = busy || !thread;
-  webSearch.setAttribute('aria-pressed', String(Boolean(thread?.web_enabled && data.web_search && !webDenied())));
+  webSearch.setAttribute('aria-pressed', String(webOn));
+  const webState = $('web-state');
+  if (webState) webState.textContent = webOn ? 'On' : 'Off';
   $('send').replaceChildren(icon(busy ? 'stop' : 'send', 21));
   $('send').title = busy ? 'Stop response' : 'Send message';
   $('send').setAttribute('aria-label', $('send').title);
@@ -993,6 +1046,9 @@ async function generateReply(thread, command, args, { restoreDraft, notice = '',
     turns.delete(thread.id);
     unreadApprovals.delete(thread.id);
     await refresh();
+    if (completed && data.appearance?.notifications && !document.hasFocus()) {
+      invoke('notify', { title: thread.title || 'OpenDex', body: 'Your reply is ready.' }).catch(() => {});
+    }
     if (thread.id === active) {
       if (!$('settings').open && !$('details').open) $('prompt').focus();
       scrollDown(true);
@@ -1106,7 +1162,12 @@ function onTurn({ thread: id, kind, details }) {
       unreadApprovals.set(id, details.id);
       navigation();
       if (id === active) { status(); scrollDown(true); }
-      else toast(`Approval needed in “${thread.title}”.`);
+      else {
+        toast(`Approval needed in “${thread.title}”.`);
+        if (data.appearance?.notifications && !document.hasFocus()) {
+          invoke('notify', { title: 'Approval needed', body: thread.title }).catch(() => {});
+        }
+      }
       break;
     case 'resolved':
       turn.approval = null;
@@ -1130,9 +1191,37 @@ function bind() {
   $('close-settings').replaceChildren(icon('close', 18));
   $('close-details').replaceChildren(icon('close', 18));
   $('close-details').addEventListener('click', () => $('details').close());
-  $('mcp-context').replaceChildren(icon('plug', 17));
+  $('mcp-context').replaceChildren(icon('plug', 17), el('span', {}, 'Add MCP context'));
   $('mcp-context').addEventListener('click', openMcpContext);
-  $('web-search').replaceChildren(icon('search', 17));
+  $('web-search').replaceChildren(icon('search', 17), el('span', {}, 'Web search'), el('span', { class: 'tool-state', id: 'web-state' }, 'Off'));
+  $('plan-mode').replaceChildren(icon('note', 16), el('span', {}, 'Plan first'), el('span', { class: 'tool-state' }, 'instructions'));
+  $('goal-mode').replaceChildren(icon('check', 16), el('span', {}, 'Goal mode'), el('span', { class: 'tool-state' }, 'instructions'));
+  $('generate-video').replaceChildren(icon('play', 16), el('span', {}, 'Generate video'), el('span', { class: 'tool-state' }, 'Soon'));
+  const toolsMenu = $('tools-menu');
+  toolsMenu.replaceChildren(icon('plus', 17));
+  toolsMenu.addEventListener('click', () => {
+    const popup = $('tools-popup');
+    const open = popup.hidden;
+    popup.hidden = !open;
+    toolsMenu.setAttribute('aria-expanded', String(open));
+    if (open) {
+      fillPresetMenu();
+      popup.querySelector('.tool-entry:not(:disabled)')?.focus();
+    }
+  });
+  $('plan-mode').addEventListener('click', transient(async () => {
+    const thread = current();
+    if (thread) return applyInstructions(thread, PLAN_INSTRUCTIONS, 'Plan first');
+  }));
+  $('goal-mode').addEventListener('click', transient(async () => {
+    const thread = current();
+    if (thread) return applyInstructions(thread, GOAL_INSTRUCTIONS, 'Goal mode');
+  }));
+  $('tools-popup').addEventListener('click', (event) => {
+    if (!event.target.closest('button')) return;
+    $('tools-popup').hidden = true;
+    toolsMenu.setAttribute('aria-expanded', 'false');
+  });
   voiceControls();
   $('voice-playback').addEventListener('click', () => {
     if (speech.current()) speech.toggle();
@@ -1151,7 +1240,7 @@ function bind() {
     }
     await dictation.toggle(thread.id);
   }));
-  $('generate-image').replaceChildren(icon('image', 17));
+  $('generate-image').replaceChildren(icon('image', 17), el('span', {}, 'Generate image'));
   $('generate-image').addEventListener('click', () => {
     const thread = current();
     if (!thread) return;
@@ -1208,8 +1297,17 @@ function bind() {
   document.addEventListener('click', (event) => {
     const dropdown = $('mode-dropdown');
     if (dropdown?.classList.contains('open') && !dropdown.contains(event.target)) showModeOptions(dropdown, false);
+    const popup = $('tools-popup');
+    if (popup && !popup.hidden && !popup.contains(event.target) && !toolsMenu.contains(event.target)) {
+      popup.hidden = true;
+      toolsMenu.setAttribute('aria-expanded', 'false');
+    }
   });
   document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('tools-popup').hidden) {
+      $('tools-popup').hidden = true;
+      toolsMenu.setAttribute('aria-expanded', 'false');
+    }
     if ((event.metaKey || event.ctrlKey) && event.key === ',') {
       event.preventDefault(); settings.open();
     }

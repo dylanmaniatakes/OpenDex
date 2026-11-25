@@ -573,6 +573,9 @@ export function settingsPanel(api) {
     const cloud = data.providers.filter((provider) => provider.kind === 'ollama_cloud');
     const endpoint = input(saved?.endpoint ?? '', { type: 'url', required: true, placeholder: 'http://127.0.0.1:8080/search', spellcheck: 'false' });
     const provider = options(cloud.map((item) => [item.id, item.name]), saved?.provider ?? cloud[0]?.id);
+    let keyId = saved?.id ?? uuid();
+    const key = input('', { type: 'password', autocomplete: 'off', spellcheck: 'false',
+      placeholder: saved?.kind === service ? 'Saved API key' : 'Paste an API key' });
     const details = el('div', { class: 'wide' });
     const status = el('div', { class: 'form-status', role: 'status' });
     const save = el('button', { type: 'submit', class: 'button primary' }, 'Save web search');
@@ -580,6 +583,10 @@ export function settingsPanel(api) {
       if (service === 'searxng' && !endpoint.reportValidity()) return;
       const value = connection();
       await run(test, status, async () => {
+        if (service === 'brave' || service === 'tavily') {
+          await api.invoke('save_web_search', { value, key: key.value.trim() || null });
+          await api.refresh();
+        }
         const count = await api.invoke('test_web_search', { value });
         status.textContent = `Search service responded. ${count} ${count === 1 ? 'source' : 'sources'} returned.`;
       });
@@ -588,6 +595,7 @@ export function settingsPanel(api) {
     function connection() {
       if (service === 'searxng') return { kind: service, endpoint: endpoint.value.trim() };
       if (service === 'ollama') return { kind: service, provider: provider.value };
+      if (service === 'brave' || service === 'tavily') return { kind: service, id: keyId };
       return null;
     }
 
@@ -601,20 +609,33 @@ export function settingsPanel(api) {
           open('providers');
         }, { glyph: 'plus' }));
       }
-      save.disabled = service === 'ollama' && !cloud.length;
+      if (service === 'brave' || service === 'tavily') {
+        key.placeholder = saved?.kind === service ? 'Saved API key' : 'Paste an API key';
+        details.append(field('API key', key,
+          saved?.kind === service
+            ? 'A key is saved in the system credential store. Enter a new key to replace it.'
+            : 'Stored in the system credential store, not in workspace.json.'));
+      }
+      const keyed = service === 'brave' || service === 'tavily';
+      save.disabled = service === 'ollama' ? !cloud.length : keyed && !key.value.trim() && saved?.kind !== service;
       test.disabled = !service || save.disabled;
       status.textContent = '';
     }
 
-    const choice = options([['', 'Off'], ['searxng', 'SearXNG'], ['ollama', 'Ollama Cloud']], service, (value) => {
+    const choice = options([
+      ['', 'Off'], ['searxng', 'SearXNG'], ['ollama', 'Ollama Cloud'],
+      ['brave', 'Brave Search'], ['tavily', 'Tavily'],
+    ], service, (value) => {
       service = value;
+      if ((value === 'brave' || value === 'tavily') && saved?.kind !== value) keyId = uuid();
+      if ((value === 'brave' || value === 'tavily') && saved?.kind === value) keyId = saved.id;
       showService();
     });
     showService();
     const form = el('form', { class: 'form-grid', onsubmit: (event) => {
       event.preventDefault();
       run(save, status, async () => {
-        await api.invoke('save_web_search', { value: connection() });
+        await api.invoke('save_web_search', { value: connection(), key: key.value.trim() || null });
         await api.refresh();
         status.textContent = 'Web search settings saved.';
       });
@@ -679,22 +700,56 @@ export function settingsPanel(api) {
       }), display));
     }
     const accent = input(value.accent, { type: 'color', oninput: (event) => update('accent', event.target.value) });
+    const swatches = el('div', { class: 'swatches' }, ['#c1f483', '#8ab4ff', '#ffb86b', '#ff8fb1', '#b39ddb', '#7ee0c9'].map((color) =>
+      el('button', { type: 'button', class: 'swatch', style: '--swatch:' + color, title: color, 'aria-label': 'Accent ' + color,
+        onclick: () => { accent.value = color; update('accent', color); } })));
+    const typeface = options([
+      ['system', 'System'], ['humanist', 'Humanist'], ['geometric', 'Geometric'], ['rounded', 'Rounded'],
+      ['slab', 'Slab'], ['mono', 'Monospace'], ['serif', 'Serif'],
+      ...(value.custom_font ? [['custom', 'Custom · ' + value.custom_font.name]] : []),
+    ], value.font, (next) => update('font', next));
+    const fontStatus = el('span', { class: 'field-note wide' },
+      value.custom_font ? value.custom_font.name + ' is imported.' : 'Import a .ttf, .otf, .woff, or .woff2 file to use your own typeface.');
+    const importFont = button('Import font…', async () => {
+      const paths = await api.io.open({ multiple: false, title: 'Choose a font', filters: [{ name: 'Fonts', extensions: ['ttf', 'otf', 'woff', 'woff2'] }] });
+      if (!paths) return;
+      try {
+        const font = await api.invoke('import_font', { path: Array.isArray(paths) ? paths[0] : paths });
+        value.custom_font = font;
+        value.font = 'custom';
+        if (![...typeface.options].some((option) => option.value === 'custom')) typeface.append(el('option', { value: 'custom' }, 'Custom · ' + font.name));
+        typeface.value = 'custom';
+        fontStatus.textContent = font.name + ' is imported. Save appearance to keep it.';
+        api.previewAppearance(value);
+      } catch (error) { api.toast(String(error), true); }
+    }, { glyph: 'plus' });
+    const removeFont = button('Remove font', () => {
+      value.custom_font = null;
+      value.font = 'system';
+      typeface.value = 'system';
+      [...typeface.options].filter((option) => option.value === 'custom').forEach((option) => option.remove());
+      fontStatus.textContent = 'Import a .ttf, .otf, .woff, or .woff2 file to use your own typeface.';
+      api.previewAppearance(value);
+    }, { style: 'button quiet' });
     page.append(formSection('Interface', '',
       el('div', { class: 'form-grid' },
         select('Color mode', 'theme', [['dark', 'Dark'], ['light', 'Light'], ['system', 'Match system']]),
-        field('Accent color', accent),
-        select('Typeface', 'font', [['system', 'System'], ['mono', 'Monospace'], ['serif', 'Serif']]),
+        field('Accent color', el('div', { class: 'accent-field' }, accent, swatches)),
+        field('Typeface', el('div', { class: 'font-field' }, typeface, el('div', { class: 'form-actions' }, importFont, removeFont))),
+        fontStatus,
         select('Spacing', 'density', [['compact', 'Compact'], ['comfortable', 'Comfortable'], ['spacious', 'Spacious']]),
         slider('Text scale', 'font_scale', 80, 140, '%'), slider('Conversation width', 'width', 600, 1400, ' px'),
         slider('Sidebar width', 'sidebar', 185, 355, ' px'), slider('Corner radius', 'radius', 0, 28, ' px'),
         check('Use animations', value.motion, (next) => update('motion', next)),
+        check('Desktop notification when a reply finishes in the background', value.notifications, (next) => update('notifications', next)),
       ), el('div', { class: 'form-actions' },
         button('Save appearance', async () => {
           try { await api.savePreferences({ appearance: value }); api.toast('Appearance saved.'); }
           catch (error) { api.toast(String(error), true); }
         }, { glyph: 'check', style: 'button primary' }),
         button('Reset defaults', async () => {
-          const defaults = { theme: 'dark', accent: '#c1f483', font_scale: 100, density: 'comfortable', font: 'system', width: 850, sidebar: 252, radius: 15, motion: true };
+          const defaults = { theme: 'dark', accent: '#c1f483', font_scale: 100, density: 'comfortable', font: 'system',
+            custom_font: null, width: 850, sidebar: 252, radius: 15, motion: true, notifications: true };
           await api.savePreferences({ appearance: defaults }); render();
         }))));
     return page;
@@ -702,13 +757,70 @@ export function settingsPanel(api) {
 
   function instructions() {
     const box = textarea(api.data().instructions, { rows: 9, placeholder: 'Add preferences for responses and workflow…', maxlength: 32000 });
+    const presets = structuredClone(api.data().presets ?? []);
+    const thread = api.data().threads.find((item) => item.id === api.data().active_thread);
+    const presetList = el('div', { class: 'preset-list' });
+
+    function drawPresets() {
+      presetList.replaceChildren(...presets.map((preset, index) => {
+        const name = input(preset.name, { placeholder: 'Preset name', maxlength: 60,
+          oninput: (event) => { preset.name = event.target.value; } });
+        const text = textarea(preset.instructions, { rows: 4, maxlength: 32000, placeholder: 'Instructions sent with this preset…' });
+        text.addEventListener('input', () => { preset.instructions = text.value; });
+        const apply = button('Apply', async () => {
+          const target = api.data().threads.find((item) => item.id === api.data().active_thread);
+          if (!target) { api.toast('Open a conversation first.', true); return; }
+          try {
+            await api.invoke('edit_thread', { id: target.id, changes: { instructions: text.value } });
+            await api.refresh();
+            api.toast('Preset applied to “' + target.title + '”.');
+          } catch (error) { api.toast(String(error), true); }
+        }, { style: 'button quiet', disabled: !thread });
+        return el('div', { class: 'preset-card' },
+          el('div', { class: 'preset-head' }, name,
+            el('div', { class: 'form-actions' }, apply,
+              button('Remove', () => { presets.splice(index, 1); drawPresets(); },
+                { style: 'button quiet', glyph: 'close', onlyIcon: true }))),
+          text);
+      }));
+      if (!presets.length) presetList.append(el('p', { class: 'muted' }, 'No presets yet. Add one to reuse a block of instructions.'));
+    }
+    drawPresets();
+
+    const memory = textarea('', { rows: 6, maxlength: 64000, placeholder: 'Notes for this project. The agent reads them before each turn.' });
+    const memoryStatus = el('span', { class: 'field-note' },
+      thread ? 'Stored in .opendex/memory.md at the project root.' : 'Open a conversation with a project to edit its memory.');
+    memory.disabled = !thread;
+    if (thread) {
+      api.invoke('thread_memory', { id: thread.id })
+        .then((text) => { memory.value = text ?? ''; })
+        .catch((error) => { memoryStatus.textContent = String(error); });
+    }
+
     return el('div', { class: 'settings-page' }, heading('Instructions', 'Set preferences sent with Model Chat and Code Agent requests.'),
       formSection('Global instructions', 'These apply to all conversations. You can add thread instructions from its menu.',
         field('Instructions', box), el('div', { class: 'form-actions' },
           button('Save instructions', async () => {
             try { await api.savePreferences({ instructions: box.value }); api.toast('Instructions saved.'); }
             catch (error) { api.toast(String(error), true); }
-          }, { glyph: 'check', style: 'button primary' }))));
+          }, { glyph: 'check', style: 'button primary' }))),
+      formSection('Presets', 'Reusable blocks of instructions. Apply one here or from the composer’s tools menu.',
+        presetList, el('div', { class: 'form-actions' },
+          button('Add preset', () => {
+            presets.push({ id: uuid(), name: '', instructions: '' });
+            drawPresets();
+          }, { glyph: 'plus' }),
+          button('Save presets', async () => {
+            try { await api.invoke('save_presets', { presets }); await api.refresh(); api.toast('Instruction presets saved.'); }
+            catch (error) { api.toast(String(error), true); }
+          }, { glyph: 'check', style: 'button primary' }))),
+      formSection('Project memory', 'Durable notes for the current project. The agent adds notes with the remember tool and reads this file before each turn.',
+        field('Memory notes', memory), el('div', { class: 'form-actions' },
+          button('Save memory', async () => {
+            if (!thread) return;
+            try { await api.invoke('save_thread_memory', { id: thread.id, text: memory.value }); api.toast('Project memory saved.'); }
+            catch (error) { api.toast(String(error), true); }
+          }, { glyph: 'check', style: 'button primary' }), memoryStatus)));
   }
 
   function backups() {

@@ -17,7 +17,7 @@ required-features = ["desktop"]
 
 [features]
 default = ["desktop"]
-desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:cpal", "dep:whisper-rs", "dep:objc2-av-foundation", "dep:block2", "dep:objc2", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-notification", "dep:cpal", "dep:whisper-rs", "dep:objc2-av-foundation", "dep:block2", "dep:objc2", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [build-dependencies]
 tauri-build = "2"
@@ -38,6 +38,7 @@ tokio = { version = "1", features = ["macros", "io-util", "fs", "net", "process"
 tokio-util = "0.7"
 tauri = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-notification = { version = "2", optional = true }
 cpal = { version = "0.16", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }

@@ -2,20 +2,23 @@
 //! The webview handles presentation and user input.
 use crate::{
     agent::{self, Capability},
-    backup, claude, codex, images,
+    backup, claude, codex, context, images,
     mcp::{self, Connection},
+    memory,
     providers::{self, Tool},
     state::{
-        AnthropicAuth, Appearance, BranchAction, Data, MAX_RESOURCE_BYTES,
-        MAX_RESOURCES_PER_MESSAGE, McpResource, McpScope, Message, Mode, Permissions, Profile,
-        Project, Provider, ProviderKind, Role, Rule, Server, Store, Thread, ToolCall, Transport,
-        WorkspaceBridgeSettings, delete_secret, one_or_many, write_secret,
+        AnthropicAuth, Appearance, BranchAction, CustomFont, Data, InstructionPreset,
+        MAX_RESOURCE_BYTES, MAX_RESOURCES_PER_MESSAGE, McpResource, McpScope, Message, Mode,
+        Permissions, Profile, Project, Provider, ProviderKind, Role, Rule, Server, Store, Thread,
+        ToolCall, Transport, WorkspaceBridgeSettings, delete_secret, one_or_many, write_secret,
     },
     transcription, voice, web, workspace_bridge, workspace_relay,
 };
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -40,7 +43,7 @@ struct Desktop {
     codex_home: PathBuf,
     runs: Mutex<HashMap<Uuid, CancellationToken>>,
     workspaces: Mutex<HashSet<PathBuf>>,
-    approvals: Mutex<HashMap<Uuid, oneshot::Sender<bool>>>,
+    approvals: Mutex<HashMap<Uuid, PendingApproval>>,
     workspace_bridge: AsyncMutex<Option<workspace_bridge::Bridge>>,
     codex_lock: AsyncMutex<()>,
     claude_lock: AsyncMutex<()>,
@@ -52,6 +55,13 @@ struct Desktop {
 
 type AppState<'a> = State<'a, Arc<Desktop>>;
 
+struct PendingApproval {
+    allow: oneshot::Sender<bool>,
+    /// Category the tool belongs to. `None` for MCP and web calls, which have
+    /// no category-wide rule the approval card may change.
+    capability: Option<Capability>,
+}
+
 fn reply<T>(result: Result<T>) -> Reply<T> {
     result.map_err(|error| format!("{error:#}"))
 }
@@ -61,6 +71,26 @@ fn fetch_thread(data: &Data, id: Uuid) -> Result<&Thread> {
         .iter()
         .find(|thread| thread.id == id)
         .context("That conversation no longer exists.")
+}
+
+/// Reference documents and saved notes for a project, in prompt order. Empty
+/// when the turn has no project or the project has neither.
+fn project_context(root: Option<&Path>) -> String {
+    let Some(root) = root else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if let Some(reference) = context::prompt(root) {
+        parts.push(reference);
+    }
+    match memory::prompt(root) {
+        Ok(Some(notes)) => parts.push(notes),
+        Ok(None) => {}
+        // A broken memory file must not take down the turn; the model simply
+        // works without it and the user can repair the file.
+        Err(error) => eprintln!("OpenDex project memory: {error:#}"),
+    }
+    parts.join("\n\n")
 }
 
 fn thread_mut(data: &mut Data, id: Uuid) -> Result<&mut Thread> {
@@ -524,12 +554,178 @@ fn save_settings(
 }
 
 #[tauri::command]
-fn save_web_search(app: AppState<'_>, value: Option<web::Config>) -> Reply<()> {
+fn notify(app: AppHandle, title: String, body: String) -> Reply<()> {
+    use tauri_plugin_notification::NotificationExt;
+    let title = title.trim();
+    let body = body.trim();
+    app.notification()
+        .builder()
+        .title(if title.is_empty() { "OpenDex" } else { title })
+        .body(text_body(body))
+        .show()
+        .map_err(|error| format!("Could not show a notification: {error}"))
+}
+
+fn text_body(body: &str) -> String {
+    let mut bounded: String = body.chars().take(180).collect();
+    if body.chars().count() > 180 {
+        bounded.push('…');
+    }
+    if bounded.is_empty() {
+        "A reply is ready.".into()
+    } else {
+        bounded
+    }
+}
+
+#[tauri::command]
+fn save_presets(
+    app: AppState<'_>,
+    presets: Vec<InstructionPreset>,
+) -> Reply<Vec<InstructionPreset>> {
+    reply(app.store.update_presets(presets))
+}
+
+/// The project a conversation works in, whether it was opened as a folder or
+/// linked to a saved project.
+fn conversation_root(data: &Data, id: Uuid) -> Result<PathBuf> {
+    let thread = fetch_thread(data, id)?;
+    thread
+        .workspace
+        .clone()
+        .or_else(|| {
+            thread.project_id.and_then(|project| {
+                data.projects
+                    .iter()
+                    .find(|item| item.id == project)
+                    .map(|item| item.root.clone())
+            })
+        })
+        .context("Choose a project for this conversation first.")
+}
+
+#[tauri::command]
+fn thread_memory(app: AppState<'_>, id: Uuid) -> Reply<Option<String>> {
+    reply((|| {
+        let data = app.store.snapshot();
+        Ok(memory::read_all(&conversation_root(&data, id)?)?)
+    })())
+}
+
+#[tauri::command]
+fn save_thread_memory(app: AppState<'_>, id: Uuid, text: String) -> Reply<()> {
+    reply((|| {
+        let data = app.store.snapshot();
+        memory::write(&conversation_root(&data, id)?, &text)
+    })())
+}
+
+/// Copy a user-chosen font into the app data folder and remember its name.
+/// The webview loads the bytes through `font_data`, so the CSP never needs a
+/// file:// origin.
+#[tauri::command]
+async fn import_font(app: AppState<'_>, path: String) -> Reply<CustomFont> {
+    reply(
+        async move {
+            let source = PathBuf::from(path);
+            let extension = source
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(str::to_ascii_lowercase)
+                .context("Choose a .ttf, .otf, .woff, or .woff2 font file.")?;
+            ensure!(
+                matches!(extension.as_str(), "ttf" | "otf" | "woff" | "woff2"),
+                "Choose a .ttf, .otf, .woff, or .woff2 font file."
+            );
+            let metadata = fs::metadata(&source).context("That font file is unavailable.")?;
+            ensure!(metadata.is_file(), "Choose a font file, not a folder.");
+            ensure!(
+                metadata.len() > 0 && metadata.len() <= 8 * 1024 * 1024,
+                "Choose a font file up to 8 MB."
+            );
+            let bytes = fs::read(&source).context("Could not read the font file.")?;
+            let file = format!(
+                "{}.{extension}",
+                Sha256::digest(&bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            let name = source
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Custom font")
+                .trim()
+                .chars()
+                .take(60)
+                .collect::<String>();
+            let directory = app.store.data_dir().join("fonts");
+            fs::create_dir_all(&directory).context("Could not create the font folder.")?;
+            fs::write(directory.join(&file), &bytes).context("Could not store the font.")?;
+            Ok(CustomFont {
+                name: if name.is_empty() {
+                    "Custom font".into()
+                } else {
+                    name
+                },
+                file,
+            })
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
+async fn font_data(app: AppState<'_>, file: String) -> Reply<String> {
+    reply(
+        async move {
+            ensure!(CustomFont::validate_file(&file), "Choose an imported font.");
+            let path = app.store.data_dir().join("fonts").join(&file);
+            ensure!(
+                fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file()),
+                "That font is no longer available."
+            );
+            let bytes = fs::read(&path).context("Could not read the font file.")?;
+            let mime = match Path::new(&file)
+                .extension()
+                .and_then(|value| value.to_str())
+            {
+                Some("otf") => "font/otf",
+                Some("woff") => "font/woff",
+                Some("woff2") => "font/woff2",
+                _ => "font/ttf",
+            };
+            Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+        }
+        .await,
+    )
+}
+
+#[tauri::command]
+fn save_web_search(
+    app: AppState<'_>,
+    value: Option<web::Config>,
+    key: Option<String>,
+) -> Reply<()> {
     reply(app.store.change(|data| {
+        let previous = data.web_search.clone();
+        if let Some(id) = value.as_ref().and_then(web::Config::secret_id)
+            && let Some(key) = key.as_deref().map(str::trim).filter(|key| !key.is_empty())
+        {
+            write_secret(id, "web-search", key)?;
+        }
         if let Some(config) = &value {
             config.resolve(&data.providers)?;
         }
-        data.set_web_search(value);
+        data.set_web_search(value.clone());
+        // Drop a key that no longer belongs to the selected service instead of
+        // leaving an orphaned credential in the store.
+        if let Some(previous) = previous
+            && previous.secret_id() != value.as_ref().and_then(web::Config::secret_id)
+            && let Some(id) = previous.secret_id()
+        {
+            let _ = delete_secret(id, "web-search");
+        }
         Ok(())
     }))
 }
@@ -1727,15 +1923,18 @@ impl Turn {
             Rule::Ask => {
                 let id = Uuid::new_v4();
                 let (send, receive) = oneshot::channel();
-                self.app
-                    .approvals
-                    .lock()
-                    .expect("approvals lock")
-                    .insert(id, send);
+                let capability = agent::capability(name);
+                self.app.approvals.lock().expect("approvals lock").insert(
+                    id,
+                    PendingApproval {
+                        allow: send,
+                        capability,
+                    },
+                );
                 let _guard = ApprovalGuard { turn: self, id };
                 self.event(
                     "approval",
-                    json!({"id":id,"tool":name,"arguments":arguments,"source":source}),
+                    json!({"id":id,"tool":name,"arguments":arguments,"source":source,"always":capability.is_some()}),
                 );
                 tokio::time::timeout(Duration::from_secs(300), receive)
                     .await
@@ -2508,6 +2707,11 @@ async fn complete_turn(
             system.push_str(instructions);
         }
     }
+    let reference = project_context(turn.root.as_deref());
+    if !reference.is_empty() {
+        system.push_str("\n\n");
+        system.push_str(&reference);
+    }
 
     let messages = portable_history(thread.messages);
     let result = async {
@@ -2729,6 +2933,7 @@ async fn complete_hermes_turn(
     bridge: Option<HermesMcpWorkspace>,
 ) -> Result<()> {
     let tools = agent::tools(thread.mode, turn.root.as_deref(), &turn.rules);
+    let project = project_context(turn.root.as_deref());
     let mut workspace = HermesWorkspace {
         bridge,
         used: 0,
@@ -2739,7 +2944,7 @@ async fn complete_hermes_turn(
     loop {
         let grant = workspace.grant;
         let execution = match grant {
-            Some(grant) => workspace_relay::instructions(grant, &tools),
+            Some(grant) => workspace_relay::instructions(grant, &tools, &project),
             None => {
                 "Hermes tools operate on the VPS. This turn has no OpenDex project tools.".into()
             }
@@ -3639,11 +3844,24 @@ async fn share_workspace(app: AppState<'_>, window: AppHandle, id: Uuid) -> Repl
 }
 
 #[tauri::command]
-fn resolve_approval(app: AppState<'_>, id: Uuid, allow: bool) -> Reply<()> {
-    if let Some(sender) = app.approvals.lock().expect("approvals lock").remove(&id) {
-        let _ = sender.send(allow);
+fn resolve_approval(app: AppState<'_>, id: Uuid, allow: bool, always: Option<bool>) -> Reply<()> {
+    let Some(approval) = app.approvals.lock().expect("approvals lock").remove(&id) else {
+        return Ok(());
+    };
+    let mut failure = None;
+    if allow
+        && always.unwrap_or(false)
+        && let Some(capability) = approval.capability
+    {
+        if let Err(error) = app.store.change(|data| {
+            agent::always_allow(&mut data.permissions, capability);
+            Ok(())
+        }) {
+            failure = Some(format!("{error:#}"));
+        }
     }
-    Ok(())
+    let _ = approval.allow.send(allow);
+    failure.map_or(Ok(()), Err)
 }
 
 // The app lock is independent of --data-dir. Keep its file handle open
@@ -3714,6 +3932,7 @@ pub fn run() {
         .or_else(|| std::env::var_os("OPENDEX_DATA_DIR").map(PathBuf::from));
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let home = if let Some(path) = override_home {
                 path
@@ -3765,6 +3984,12 @@ pub fn run() {
             mcp_read_resource,
             mcp_get_prompt,
             save_settings,
+            save_presets,
+            notify,
+            thread_memory,
+            save_thread_memory,
+            import_font,
+            font_data,
             save_web_search,
             test_web_search,
             save_voice_profile,

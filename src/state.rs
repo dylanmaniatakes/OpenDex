@@ -524,10 +524,37 @@ pub struct Appearance {
     pub font_scale: u16,
     pub density: String,
     pub font: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_font: Option<CustomFont>,
     pub width: u16,
     pub sidebar: u16,
     pub radius: u8,
     pub motion: bool,
+    /// Notify when a reply finishes while the window is in the background.
+    pub notifications: bool,
+}
+
+/// A font file imported into the app data folder. Only the file name is
+/// stored; the bytes never enter workspace.json.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomFont {
+    /// Display family name, shown in the typeface menu.
+    pub name: String,
+    /// File name inside `<app data>/fonts`.
+    pub file: String,
+}
+
+impl CustomFont {
+    pub fn validate_file(file: &str) -> bool {
+        !file.is_empty()
+            && file.len() <= 120
+            && !file.contains(['/', '\\'])
+            && !file.contains("..")
+            && matches!(
+                Path::new(file).extension().and_then(|value| value.to_str()),
+                Some("ttf" | "otf" | "woff" | "woff2")
+            )
+    }
 }
 
 impl Default for Appearance {
@@ -538,10 +565,12 @@ impl Default for Appearance {
             font_scale: 100,
             density: "comfortable".into(),
             font: "system".into(),
+            custom_font: None,
             width: 850,
             sidebar: 252,
             radius: 15,
             motion: true,
+            notifications: true,
         }
     }
 }
@@ -558,7 +587,18 @@ impl Appearance {
         ) {
             self.density = defaults.density;
         }
-        if !matches!(self.font.as_str(), "system" | "mono" | "serif") {
+        if let Some(font) = &self.custom_font {
+            if !CustomFont::validate_file(&font.file) || font.name.trim().is_empty() {
+                self.custom_font = None;
+            }
+        }
+        if self.font == "custom" && self.custom_font.is_none() {
+            self.font = defaults.font.clone();
+        }
+        if !matches!(
+            self.font.as_str(),
+            "system" | "mono" | "serif" | "humanist" | "geometric" | "rounded" | "slab" | "custom"
+        ) {
             self.font = defaults.font;
         }
         if self.accent.len() != 7
@@ -582,6 +622,52 @@ pub enum Mode {
     #[default]
     Chat,
     Agent,
+}
+
+/// A named block of extra instructions. Presets live in settings; applying one
+/// copies its text onto a thread, so a later edit does not silently change a
+/// conversation that is already under way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionPreset {
+    pub id: Uuid,
+    pub name: String,
+    pub instructions: String,
+}
+
+impl InstructionPreset {
+    pub fn sanitized(mut self) -> Result<Self> {
+        self.name = self.name.trim().to_owned();
+        ensure!(
+            !self.name.is_empty() && self.name.chars().count() <= 60,
+            "Give each preset a name up to 60 characters."
+        );
+        ensure!(
+            !self.name.chars().any(char::is_control),
+            "A preset name cannot contain control characters."
+        );
+        ensure!(
+            self.instructions.chars().count() <= 32_000,
+            "Preset instructions are too long."
+        );
+        self.instructions = self.instructions.trim().to_owned();
+        Ok(self)
+    }
+}
+
+/// Validate a full preset list in place: bounded count and unique names.
+pub fn sanitize_presets(presets: Vec<InstructionPreset>) -> Result<Vec<InstructionPreset>> {
+    ensure!(presets.len() <= 40, "Keep up to 40 instruction presets.");
+    let mut out: Vec<InstructionPreset> = Vec::with_capacity(presets.len());
+    for preset in presets {
+        let preset = preset.sanitized()?;
+        ensure!(
+            !out.iter()
+                .any(|seen| seen.name.eq_ignore_ascii_case(&preset.name)),
+            "Preset names must be unique."
+        );
+        out.push(preset);
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -958,6 +1044,8 @@ pub struct Data {
     pub appearance: Appearance,
     pub codex_path: String,
     pub instructions: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub presets: Vec<InstructionPreset>,
     pub active_thread: Option<Uuid>,
 }
 
@@ -979,6 +1067,7 @@ impl Default for Data {
             appearance: Appearance::default(),
             codex_path: "codex".into(),
             instructions: String::new(),
+            presets: Vec::new(),
             active_thread: None,
         }
     }
@@ -1160,6 +1249,20 @@ impl Store {
             Ok(())
         })
     }
+
+    /// Replace the preset list. Returns the validated copy that was stored so
+    /// the UI can render exactly what will be used next turn.
+    pub fn update_presets(
+        &self,
+        presets: Vec<InstructionPreset>,
+    ) -> Result<Vec<InstructionPreset>> {
+        let presets = sanitize_presets(presets)?;
+        self.change(|data| {
+            data.presets = presets.clone();
+            Ok(())
+        })?;
+        Ok(presets)
+    }
 }
 
 impl Drop for Store {
@@ -1266,5 +1369,62 @@ mod tests {
         provider.anthropic_auth = AnthropicAuth::Api;
         provider.endpoint = "https://gateway.example.org/v1".into();
         provider.validate().unwrap();
+    }
+
+    #[test]
+    fn presets_are_trimmed_validated_and_unique() {
+        let presets = sanitize_presets(vec![
+            InstructionPreset {
+                id: Uuid::new_v4(),
+                name: "  Plan  ".into(),
+                instructions: "Plan first.".into(),
+            },
+            InstructionPreset {
+                id: Uuid::new_v4(),
+                name: "Review".into(),
+                instructions: "".into(),
+            },
+        ])
+        .unwrap();
+        assert_eq!(presets[0].name, "Plan");
+        assert_eq!(presets[1].name, "Review");
+
+        let duplicate = sanitize_presets(vec![
+            InstructionPreset {
+                id: Uuid::new_v4(),
+                name: "Plan".into(),
+                instructions: "".into(),
+            },
+            InstructionPreset {
+                id: Uuid::new_v4(),
+                name: "plan".into(),
+                instructions: "".into(),
+            },
+        ]);
+        assert!(duplicate.is_err());
+        let blank = sanitize_presets(vec![InstructionPreset {
+            id: Uuid::new_v4(),
+            name: "   ".into(),
+            instructions: "".into(),
+        }]);
+        assert!(blank.is_err());
+    }
+
+    #[test]
+    fn custom_font_files_must_stay_inside_the_font_folder() {
+        assert!(CustomFont::validate_file("inter-1234.woff2"));
+        assert!(CustomFont::validate_file("Charter.otf"));
+        assert!(!CustomFont::validate_file("../Charter.otf"));
+        assert!(!CustomFont::validate_file("sub/Charter.otf"));
+        assert!(!CustomFont::validate_file("Charter.exe"));
+        assert!(!CustomFont::validate_file(""));
+
+        let mut appearance = Appearance::default();
+        appearance.font = "custom".into();
+        assert_eq!(appearance.custom_font, None);
+        appearance.sanitize();
+        // No file means the custom choice falls back instead of leaving a
+        // font-family the browser cannot resolve.
+        assert_eq!(appearance.font, "system");
     }
 }
