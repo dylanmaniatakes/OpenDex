@@ -6,7 +6,7 @@ OpenDex is a desktop workspace for chatting with AI models and working on local 
 - **Code Agent** can inspect and edit a project, run permitted commands, and review Git changes. OpenDex shows approval prompts based on your permissions.
 - **Independent services** let you choose separate providers for chat, web search, image generation, speech, and dictation.
 - **MCP connections** add tools, resources, and reusable prompts. A paired Hermes connection can handle approved tasks on a VPS while OpenDex continues to run workspace tools locally.
-
+d
 The first release is available as an [Apple Silicon macOS download](https://github.com/dylanmaniatakes/OpenDex/releases/tag/v1.0.0). Apple Silicon macOS is the tested desktop platform so far. See [platform plans and ways to help](#roadmap-and-community) for Linux and Windows.
 
 ![Model Chat with a local Ollama model, conversation history, and the composer](docs/screenshots/model-chat.png)
